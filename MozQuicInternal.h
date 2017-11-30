@@ -101,6 +101,13 @@ enum keyPhase {
   keyPhase1Rtt
 };
 
+enum earlyDataState {
+  EARLY_DATA_NOT_NEGOTIATED,
+  EARLY_DATA_SENT,
+  EARLY_DATA_IGNORED,
+  EARLY_DATA_ACCEPTED
+};
+
 class StreamPair;
 class StreamAck;
 class NSSHelper;
@@ -150,6 +157,18 @@ public:
   bool GetForceAddressValidation() {
     return mParent ? mParent->mForceAddressValidation : mForceAddressValidation;
   }
+  void SetEnable0RTT() {
+    mEnabled0RTT = true;
+  }
+  bool Enabled0RTT() {
+    return mParent ? mParent->mEnabled0RTT : mEnabled0RTT;
+  }
+  void SetReject0RTTData() {
+    mReject0RTTData = true;
+  }
+  bool Reject0RTTData() {
+    return mParent ? mParent->mReject0RTTData : mReject0RTTData;
+  }
   void SetStreamWindow(uint64_t w) { mAdvertiseStreamWindow = w; }
   void SetConnWindowKB(uint64_t kb) { mAdvertiseConnectionWindowKB = kb; }
   void SetDropRate(uint64_t dr) { mDropRate = dr; }
@@ -194,6 +213,7 @@ private:
   int ProcessClientCleartext(unsigned char *pkt, uint32_t pktSize, LongHeaderData &, bool&);
   uint32_t ProcessGeneralDecoded(const unsigned char *, uint32_t size, bool &, bool fromClearText);
   uint32_t ProcessGeneral(const unsigned char *, uint32_t size, uint32_t headerSize, uint64_t packetNumber, bool &);
+  uint32_t Process0RTTProtectedPacket(const unsigned char *, uint32_t size, uint32_t headerSize, uint64_t packetNumber, bool &);
   uint32_t BufferForLater(const unsigned char *pkt, uint32_t pktSize, uint32_t headerSize,
                           uint64_t packetNum);
   uint32_t ReleaseProtectedPackets();
@@ -213,7 +233,7 @@ private:
                                        uint32_t &_ptr);
   
   bool ServerState() { return mConnectionState > SERVER_STATE_BREAK; }
-  MozQuic *FindSession(uint64_t cid);
+  MozQuic *FindSession(uint64_t cid, bool isClientOriginal = false);
   void RemoveSession(uint64_t cid);
   uint32_t ClientConnected();
   uint32_t ServerConnected();
@@ -222,6 +242,7 @@ private:
   uint32_t FlushStream0(bool forceAck);
 
   int Client1RTT();
+  int ClientReadPostHandshakeTLSMessages();
   int Server1RTT();
   int Bind(int portno);
   bool VersionOK(uint32_t proposed);
@@ -237,6 +258,7 @@ private:
 
   uint32_t Transmit(const unsigned char *, uint32_t len, struct sockaddr_in *peer);
   uint32_t CreateShortPacketHeader(unsigned char *pkt, uint32_t pktSize, uint32_t &used);
+  uint32_t CreateLongPacketHeader(unsigned char *pkt, uint32_t pktSize, uint32_t &used);
   uint32_t ProtectedTransmit(unsigned char *header, uint32_t headerLen,
                              unsigned char *data, uint32_t dataLen, uint32_t dataAllocation,
                              bool addAcks, uint32_t mtuOverride = 0);
@@ -266,6 +288,8 @@ private:
   bool mIsLoopback;
   bool mProcessedVN;
   bool mBackPressure;
+  bool mEnabled0RTT;
+  bool mReject0RTTData;
 
   enum connectionState mConnectionState;
   int mOriginPort;
@@ -340,6 +364,10 @@ private:
 
   std::unique_ptr<unsigned char []> mRemoteTransportExtensionInfo;
   uint32_t mRemoteTransportExtensionInfoLen;
+
+  bool mCheck0RTTPossible;
+  earlyDataState mEarlyDataState;
+  uint64_t mEarlyDataLastPacketNumber;
 
 public: // callbacks from nsshelper
   int32_t NSSInput(void *buf, int32_t amount);
