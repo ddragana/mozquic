@@ -428,6 +428,8 @@ StreamState::Reset0RTTData()
       std::unique_ptr<ReliableData> x(std::move(chunk));
       (*i).second->mOut.mStreamUnWritten.push_front(std::move(x));
       mStreamsReadyToWrite.push_front(chunk->mStreamID);
+      (*i).second->mOut.mOffsetChargedToConnFlowControl = 0;
+      (*i).second->mOut.mBlocked = false;
     }
     iter++;
   }
@@ -441,6 +443,8 @@ StreamState::Reset0RTTData()
       std::unique_ptr<ReliableData> x(std::move(chunk));
       (*i).second->mOut.mStreamUnWritten.push_front(std::move(x));
       mStreamsReadyToWrite.push_front(chunk->mStreamID);
+      (*i).second->mOut.mOffsetChargedToConnFlowControl = 0;
+      (*i).second->mOut.mBlocked = false;
     }
     iter2++;
   }
