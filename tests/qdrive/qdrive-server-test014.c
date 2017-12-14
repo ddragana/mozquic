@@ -3,7 +3,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-//  -qdrive-test12 connects, client and server exchange data, client closes the connection and reconnect again. On the second connect 0RTT should be used.
+//  -qdrive-test14 connects, client and server exchange data, client closes the connection and reconnect again. On the second connect 0RTT should be used.
 
 #include "qdrive-common.h"
 #include <string.h>
@@ -12,25 +12,25 @@
 static struct closure
 {
   int test_state;
-  mozquic_stream_t *test12_stream;
+  mozquic_stream_t *test14_stream;
   int stream_state[2];
-  int test12_iters[2];
+  int test14_iters[2];
   mozquic_connection_t *child;
   int connection;
 } testState;
 
-void *testGetClosure12()
+void *testGetClosure14()
 {
   return &testState;
 }
 
-void testConfig12(struct mozquic_config_t *_c)
+void testConfig14(struct mozquic_config_t *_c)
 {
   testState.test_state = 0;
   test_assert(mozquic_unstable_api1(_c, "enable0RTT", 1, 0) == MOZQUIC_OK);
 }
 
-int testEvent12(void *closure, uint32_t event, void *param)
+int testEvent14(void *closure, uint32_t event, void *param)
 {
   test_assert(closure == &testState);
   test_assert(event != MOZQUIC_EVENT_ERROR);
@@ -47,7 +47,7 @@ int testEvent12(void *closure, uint32_t event, void *param)
     }
     testState.test_state++;
     testState.child = (mozquic_connection_t *) param;
-    mozquic_set_event_callback(testState.child, testEvent12);
+    mozquic_set_event_callback(testState.child, testEvent14);
     mozquic_set_event_callback_closure(testState.child, &testState);
 
     return MOZQUIC_OK;
@@ -98,15 +98,15 @@ int testEvent12(void *closure, uint32_t event, void *param)
         test_assert(buf[0] >= '0');
         test_assert(buf[0] <= '9');
         testState.stream_state[testState.connection - 1]++;
-        testState.test12_iters[testState.connection - 1] = buf[0] - '0';
+        testState.test14_iters[testState.connection - 1] = buf[0] - '0';
         break;
       case 5:
         test_assert(buf[0] == '\n');
         testState.stream_state[testState.connection - 1]++;
         char buf[10];
         memset(buf, 'A', 10);
-        fprintf(stderr,"QDRIVE SERVER %p expect %d\n", stream, testState.test12_iters[testState.connection - 1]);
-        mozquic_send(stream, buf, testState.test12_iters[testState.connection - 1], 1);
+        fprintf(stderr,"QDRIVE SERVER %p expect %d\n", stream, testState.test14_iters[testState.connection - 1]);
+        mozquic_send(stream, buf, testState.test14_iters[testState.connection - 1], 1);
         testState.test_state++;
         break;
       }

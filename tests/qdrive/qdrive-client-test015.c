@@ -3,7 +3,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-//  -qdrive-test13 this is the same as test12 only 0RTT data will be rejected by the server - connects, client and server exchange data, client closes the connection and reconnect again. On the second connect 0RTT should be used but it will not be accepted by the server.
+//  -qdrive-test15 this is the same as test14 only 0RTT data will be rejected by the server - connects, client and server exchange data, client closes the connection and reconnect again. On the second connect 0RTT should be used but it will not be accepted by the server.
 
 #include "qdrive-common.h"
 #include <string.h>
@@ -12,18 +12,18 @@
 static struct closure
 {
   int test_state;
-  mozquic_stream_t *test13_stream[2];
-  int test13_fin[2];
+  mozquic_stream_t *test15_stream[2];
+  int test15_fin[2];
   int connection;
 } testState;
 
-void testConfig13(struct mozquic_config_t *_c)
+void testConfig15(struct mozquic_config_t *_c)
 {
   testState.test_state = 0;
   test_assert(mozquic_unstable_api1(_c, "enable0RTT", 1, 0) == MOZQUIC_OK);
 }
 
-void *testGetClosure13()
+void *testGetClosure15()
 {
   return &testState;
 }
@@ -32,10 +32,10 @@ static void onConnected(mozquic_connection_t *localConnection)
 {
   char buf[] = "GET 8\n";
 
-  mozquic_start_new_stream(&testState.test13_stream[testState.connection - 1], localConnection, buf, strlen(buf), 0);
+  mozquic_start_new_stream(&testState.test15_stream[testState.connection - 1], localConnection, buf, strlen(buf), 0);
 }
 
-int testEvent13(void *closure, uint32_t event, void *param)
+int testEvent15(void *closure, uint32_t event, void *param)
 {
   test_assert(closure == &testState);
   test_assert(event != MOZQUIC_EVENT_CLOSE_CONNECTION);
@@ -72,8 +72,8 @@ int testEvent13(void *closure, uint32_t event, void *param)
     } else {
       test_assert(testState.test_state == 4);
     }
-    test_assert(!testState.test13_fin[testState.connection - 1]);
-    test_assert(stream == testState.test13_stream[testState.connection - 1]);
+    test_assert(!testState.test15_fin[testState.connection - 1]);
+    test_assert(stream == testState.test15_stream[testState.connection - 1]);
 
     char buf[50];
     uint32_t read = 0;
@@ -88,7 +88,7 @@ int testEvent13(void *closure, uint32_t event, void *param)
         test_assert(shouldRead == 0);
         mozquic_end_stream(stream);
         
-        testState.test13_fin[testState.connection - 1] = 1;
+        testState.test15_fin[testState.connection - 1] = 1;
         testState.test_state++;
       }
     } while (!fin && read > 0);
