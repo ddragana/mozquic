@@ -65,13 +65,11 @@ enum transportErrorType {
   STREAM_ID_ERROR           = 0x0004,
   STREAM_STATE_ERROR        = 0x0005,
   FINAL_OFFSET_ERROR        = 0x0006,
-  FRAME_FORMAT_ERROR        = 0x0007,
+  FRAME_ENCODING_ERROR      = 0x0007,
   ERROR_TRANSPORT_PARAMETER = 0x0008,
   ERROR_VERSION_NEGOTIATION = 0x0009,
   PROTOCOL_VIOLATION        = 0x000A,
   UNSOLICITED_PATH_RESPONSE = 0x000B,
-  // FRAME_ERROR 0x01XX
-  FRAME_ERROR_MASK          = 0x0100
 };
 
 enum httpErrorType {
@@ -240,7 +238,7 @@ public:
   bool DecodedOK() { return mDecodedOK; }
   void GetPeerAddressHash(CID cid, unsigned char *out, uint32_t *outLen);
   static uint64_t Timestamp();
-  void Shutdown(uint16_t code, const char *);
+  void Shutdown(uint16_t code, uint64_t frameType, const char *);
 
   void StartBackPressure() { mBackPressure = true; }
   void ReleaseBackPressure();

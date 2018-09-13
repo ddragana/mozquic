@@ -249,6 +249,23 @@ FrameHeaderData::FrameHeaderData(const unsigned char *pkt, uint32_t pktSize,
   const unsigned char *framePtr = pkt + 1;
   const unsigned char *endOfPkt = pkt + pktSize;
 
+  // type field is a variable length integer encoded.
+  // We currently support only frame types from  draft-ietf-quic-transport. The types can
+  // be encoded in 1 byte (they are less than 2^8-1). As the draft states for the type
+  // field the shortest possible encoding MUST be used.
+  if (type & VARIABLE_INTEGER_ENCODING_BITS) {
+    uint64_t tmp64 = 0;
+    MozQuic::DecodeVarint(pkt, pktSize, tmp64, used);
+    if (tmp64 < (1 << 6)) {
+      session->Shutdown(PROTOCOL_VIOLATION, tmp64, "invalid type field encoding");
+      session->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "invalid type field encoding");
+    } else {
+      session->Shutdown(PROTOCOL_VIOLATION, tmp64, "Unknown frame");
+      session->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "Unknown frame");
+    }
+    return;
+  }
+
   if ((type & FRAME_MASK_STREAM) == FRAME_TYPE_STREAM) {
     mType = FRAME_TYPE_STREAM;
     u.mStream.mFinBit = (type & STREAM_FIN_BIT);
@@ -283,7 +300,7 @@ FrameHeaderData::FrameHeaderData(const unsigned char *pkt, uint32_t pktSize,
 
     if ((framePtr - pkt) + u.mStream.mDataLen > pktSize) {
       if (!fromCleartext) {
-        session->Shutdown(FRAME_FORMAT_ERROR, "stream frame header short");
+        session->Shutdown(FRAME_ENCODING_ERROR, FRAME_TYPE_STREAM, "stream frame header short");
       }
       session->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "stream frame data short");
       return;
@@ -345,6 +362,16 @@ FrameHeaderData::FrameHeaderData(const unsigned char *pkt, uint32_t pktSize,
       }
       framePtr += 2;
 
+      if (mType == FRAME_TYPE_CONN_CLOSE) {
+        uint64_t frameType;
+        if (MozQuic::DecodeVarint(framePtr, endOfPkt - framePtr, frameType, used) != MOZQUIC_OK) {
+          session->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "parse err");
+          return;
+        }
+        framePtr += used;
+        u.mConnClose.mFrameType = frameType;
+      }
+
       {
         uint32_t len;
         if (MozQuic::DecodeVarintMax32(framePtr, endOfPkt - framePtr, len, used) != MOZQUIC_OK) {
@@ -363,8 +390,14 @@ FrameHeaderData::FrameHeaderData(const unsigned char *pkt, uint32_t pktSize,
           if (len < 2048) {
             memcpy(reason, framePtr, len);
             reason[len] = '\0';
-            Log::sDoLog(Log::CONNECTION, 4, session,
-                        "Close conn code %X reason: %s\n", tmp16, reason);
+            if (mType == FRAME_TYPE_CONN_CLOSE) {
+              Log::sDoLog(Log::CONNECTION, 4, session,
+                          "Close conn code %X frame type %X reason: %s\n",
+                          tmp16, u.mConnClose.mFrameType, reason);
+            } else {
+              Log::sDoLog(Log::CONNECTION, 4, session,
+                          "Close conn code %X reason: %s\n", tmp16, reason);
+            }
           }
           framePtr += len;
         }
@@ -424,7 +457,7 @@ FrameHeaderData::FrameHeaderData(const unsigned char *pkt, uint32_t pktSize,
 
     case FRAME_TYPE_PATH_CHALLENGE:
       if (fromCleartext) {
-        session->Shutdown(FRAME_FORMAT_ERROR, "Frame Type not allowed");
+        session->Shutdown(FRAME_ENCODING_ERROR, FRAME_TYPE_PATH_CHALLENGE, "Frame Type not allowed");
         return;
       }
 
@@ -442,7 +475,7 @@ FrameHeaderData::FrameHeaderData(const unsigned char *pkt, uint32_t pktSize,
 
     case FRAME_TYPE_PATH_RESPONSE:
       if (fromCleartext) {
-        session->Shutdown(FRAME_FORMAT_ERROR, "Frame Type not allowed");
+        session->Shutdown(FRAME_ENCODING_ERROR, FRAME_TYPE_PATH_RESPONSE, "Frame Type not allowed");
         return;
       }
 

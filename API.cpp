@@ -186,7 +186,7 @@ int mozquic_destroy_connection(mozquic_connection_t *conn)
 int mozquic_shutdown_connection(mozquic_connection_t *conn)
 {
   mozquic::MozQuic *self(reinterpret_cast<mozquic::MozQuic *>(conn));
-  self->Shutdown(0, "");
+  self->Shutdown(0, 0, "");
   return MOZQUIC_OK;
 }
 

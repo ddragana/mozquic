@@ -81,7 +81,7 @@ StreamState::MakeSureStreamCreated(uint32_t streamID)
     // streamID that are not already opened, but only open uni=orbidirectional
     // streams depending on the stream type.
     if (streamID > mLocalMaxStreamID[streamType]) {
-      mMozQuic->Shutdown(STREAM_ID_ERROR, "recv stream id too high\n");
+      mMozQuic->Shutdown(STREAM_ID_ERROR, FRAME_TYPE_STREAM, "recv stream id too high\n");
       mMozQuic->RaiseError(MOZQUIC_ERR_IO, "need stream id %d but peer only allowed %d\n",
                            streamID, mLocalMaxStreamID[streamType]);
       return MOZQUIC_ERR_IO;
@@ -114,7 +114,7 @@ StreamState::MakeSureStreamCreated(uint32_t streamID)
   } else { // stream should have been intiated by this end
     if (streamID >= mNextStreamID[streamType]) {
       assert(mStreams.find(streamID) == mStreams.end());
-      mMozQuic->Shutdown(STREAM_STATE_ERROR, "recvd frame on stream this peer should have started");
+      mMozQuic->Shutdown(STREAM_STATE_ERROR, FRAME_TYPE_STREAM, "recvd frame on stream this peer should have started");
       mMozQuic->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "recvd frame on stream this peer should have started");
       return MOZQUIC_ERR_GENERAL;
     }
@@ -200,14 +200,14 @@ StreamState::HandleStreamFrame(FrameHeaderData *result, bool fromCleartext,
 
   if (!result->u.mStream.mStreamID && result->u.mStream.mFinBit) {
     if (!fromCleartext) {
-      mMozQuic->Shutdown(PROTOCOL_VIOLATION, "fin not allowed on stream 0\n");
+      mMozQuic->Shutdown(PROTOCOL_VIOLATION, FRAME_TYPE_STREAM, "fin not allowed on stream 0\n");
     }
     mMozQuic->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "fin not allowed on stream 0\n");
     return MOZQUIC_ERR_GENERAL;
   }
 
   if (IsSendOnlyStream(result->u.mStream.mStreamID)) {
-    mMozQuic->Shutdown(PROTOCOL_VIOLATION, "received data on a local uni-stream.\n");
+    mMozQuic->Shutdown(PROTOCOL_VIOLATION, FRAME_TYPE_STREAM, "received data on a local uni-stream.\n");
     mMozQuic->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "received data on a local uni-stream.\n");
     return MOZQUIC_ERR_GENERAL;
   }
@@ -250,14 +250,14 @@ StreamState::HandleMaxStreamDataFrame(FrameHeaderData *result, bool fromCleartex
   uint32_t streamID = result->u.mMaxStreamData.mStreamID;
 
   if (IsRecvOnlyStream(result->u.mMaxStreamData.mStreamID)) {
-    mMozQuic->Shutdown(PROTOCOL_VIOLATION, "received maxstreamdata on a recv only stream.\n");
+    mMozQuic->Shutdown(PROTOCOL_VIOLATION, FRAME_TYPE_STREAM, "received maxstreamdata on a recv only stream.\n");
     mMozQuic->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "received maxstreamdata on a recv only stream.\n");
     return MOZQUIC_ERR_GENERAL;
   }
 
   if (IsSendOnlyStream(result->u.mMaxStreamData.mStreamID) &&
       result->u.mMaxStreamData.mStreamID >= mNextStreamID[1]) {
-    mMozQuic->Shutdown(PROTOCOL_VIOLATION, "received maxstreamdata on unopened sendonly stream.\n");
+    mMozQuic->Shutdown(PROTOCOL_VIOLATION, FRAME_TYPE_STREAM, "received maxstreamdata on unopened sendonly stream.\n");
     mMozQuic->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "received maxstreamdata on unopened sendonly stream.\n");
     return MOZQUIC_ERR_GENERAL;
   }
@@ -335,7 +335,7 @@ StreamState::HandleMaxStreamIDFrame(FrameHeaderData *result, bool fromCleartext,
              result->u.mMaxStreamID.mMaximumStreamID);
 
   if (!IsLocalStream(result->u.mMaxStreamID.mMaximumStreamID)) {
-    mMozQuic->Shutdown(FRAME_ERROR_MASK | FRAME_TYPE_MAX_STREAM_ID, "remote max stream id\n");
+    mMozQuic->Shutdown(PROTOCOL_VIOLATION, FRAME_TYPE_MAX_STREAM_ID, "remote max stream id\n");
     mMozQuic->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "remote max stream id\n");
     return MOZQUIC_ERR_GENERAL;
   }
@@ -360,7 +360,7 @@ StreamState::HandleStreamBlockedFrame(FrameHeaderData *result, bool fromCleartex
   uint32_t streamID = result->u.mStreamBlocked.mStreamID;
 
   if (IsSendOnlyStream(result->u.mStreamBlocked.mStreamID)) {
-    mMozQuic->Shutdown(PROTOCOL_VIOLATION, "received streamblocked on a local uni-stream.\n");
+    mMozQuic->Shutdown(PROTOCOL_VIOLATION, FRAME_TYPE_STREAM, "received streamblocked on a local uni-stream.\n");
     mMozQuic->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "received streamblocked on a local uni-stream.\n");
     return MOZQUIC_ERR_GENERAL;
   }
@@ -411,13 +411,13 @@ StreamState::HandleResetStreamFrame(FrameHeaderData *result, bool fromCleartext,
              result->u.mRstStream.mFinalOffset);
 
   if (!result->u.mRstStream.mStreamID) {
-    mMozQuic->Shutdown(PROTOCOL_VIOLATION, "rst_stream frames not allowed on stream 0\n");
+    mMozQuic->Shutdown(PROTOCOL_VIOLATION, FRAME_TYPE_RST_STREAM, "rst_stream frames not allowed on stream 0\n");
     mMozQuic->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "rst_stream frames not allowed on stream 0\n");
     return MOZQUIC_ERR_GENERAL;
   }
 
   if (IsSendOnlyStream(result->u.mRstStream.mStreamID)) {
-    mMozQuic->Shutdown(PROTOCOL_VIOLATION, "rst_stream frames not allowed on send only stream\n");
+    mMozQuic->Shutdown(PROTOCOL_VIOLATION, FRAME_TYPE_RST_STREAM, "rst_stream frames not allowed on send only stream\n");
     mMozQuic->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "rst_stream not allowed on send only stream\n");
     return MOZQUIC_ERR_GENERAL;
   }
@@ -445,7 +445,7 @@ StreamIn::HandleResetStream(uint64_t finalOffset)
   if (mFinalOffset && (mFinalOffset != finalOffset)) {
     StreamLog1("stream %d recvd rst with finoffset of %ld expected %ld\n",
                mStreamID, finalOffset, mFinalOffset);
-    mMozQuic->Shutdown(FINAL_OFFSET_ERROR, "offset too large");
+    mMozQuic->Shutdown(FINAL_OFFSET_ERROR, FRAME_TYPE_RST_STREAM, "offset too large");
     return MOZQUIC_ERR_IO;
   }
 
@@ -467,7 +467,7 @@ StreamState::HandleStopSendingFrame(FrameHeaderData *result, bool fromCleartext,
   }
 
   if (IsRecvOnlyStream(result->u.mStopSending.mStreamID)) {
-    mMozQuic->Shutdown(PROTOCOL_VIOLATION, "received stopSending on wrong uni-stream.\n");
+    mMozQuic->Shutdown(PROTOCOL_VIOLATION, FRAME_TYPE_STOP_SENDING, "received stopSending on wrong uni-stream.\n");
     mMozQuic->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "received stopSending on wrong uni-stream.\n");
     return MOZQUIC_ERR_GENERAL;
   }
@@ -1168,7 +1168,7 @@ StreamState::ConnectionReadBytes(uint64_t amt)
 
   if (mLocalMaxDataUsed + amt > mLocalMaxData) {
     StreamLog1("Peer violated connection flow control\n");
-    mMozQuic->Shutdown(FLOW_CONTROL_ERROR,
+    mMozQuic->Shutdown(FLOW_CONTROL_ERROR, FRAME_TYPE_STREAM,
                        "peer violated connection flow control\n");
     return MOZQUIC_ERR_IO;
   }
@@ -1795,7 +1795,7 @@ StreamIn::Supply(std::unique_ptr<ReliableData> &d)
       if (mFinalOffset != d->mOffset + d->mLen) {
         StreamLog1("stream %d recvd fin with offset of %ld.%ld expected %ld\n",
                    mStreamID, d->mOffset, d->mLen, mFinalOffset);
-        mMozQuic->Shutdown(FINAL_OFFSET_ERROR, "offset too large");
+        mMozQuic->Shutdown(FINAL_OFFSET_ERROR, FRAME_TYPE_STREAM, "offset too large");
         return MOZQUIC_ERR_IO;
       }
     }
@@ -1804,7 +1804,7 @@ StreamIn::Supply(std::unique_ptr<ReliableData> &d)
   if (mFinalOffset && (d->mOffset + d->mLen > mFinalOffset)) {
     StreamLog1("stream %d has finoffset of %ld and new packet %ld.%ld\n",
                mStreamID, mFinalOffset, d->mOffset, d->mLen);
-    mMozQuic->Shutdown(FINAL_OFFSET_ERROR, "offset too large");
+    mMozQuic->Shutdown(FINAL_OFFSET_ERROR, FRAME_TYPE_STREAM, "offset too large");
     return MOZQUIC_ERR_IO;
   }
   
@@ -1824,7 +1824,7 @@ StreamIn::Supply(std::unique_ptr<ReliableData> &d)
     // todo - credit scheme should be based on how much is queued here.
     // todo - autotuning
     if (mStreamID && (mNextStreamDataExpected > mLocalMaxStreamData)) {
-      mMozQuic->Shutdown(FLOW_CONTROL_ERROR, "stream flow control error");
+      mMozQuic->Shutdown(FLOW_CONTROL_ERROR, FRAME_TYPE_STREAM, "stream flow control error");
       StreamLog1("stream flow control recvd too much data\n");
       return MOZQUIC_ERR_IO;
     }

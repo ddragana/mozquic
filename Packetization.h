@@ -145,6 +145,8 @@ enum FrameType {
   FRAME_TYPE_STREAM            = 0x10, // 0001 0...
 };
 
+#define VARIABLE_INTEGER_ENCODING_BITS 0xC0
+
 class FrameHeaderData
 {
 public:
@@ -176,6 +178,7 @@ public:
     } mStopSending;
     struct {
       uint16_t mErrorCode;
+      uint64_t mFrameType;
     } mConnClose;
     struct {
       uint16_t mErrorCode;
@@ -224,4 +227,3 @@ enum FrameTypeLengths {
 
 }
 
-  

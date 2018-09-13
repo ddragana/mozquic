@@ -150,7 +150,7 @@ MozQuic::IsAllAcked()
 void
 MozQuic::Destroy(uint32_t code, const char *reason)
 {
-  Shutdown(code, reason);
+  Shutdown(code, 0, reason);
   mAlive = nullptr;
 }
 
@@ -344,7 +344,7 @@ MozQuic::ProtectedTransmit(unsigned char *header, uint32_t headerLen, const unsi
 }
 
 void
-MozQuic::Shutdown(uint16_t code, const char *reason)
+MozQuic::Shutdown(uint16_t code, uint64_t frameType, const char *reason)
 {
   if (mParent) {
     for (auto iter = mParent->mChildren.begin(); iter != mParent->mChildren.end(); ++iter) {
@@ -388,11 +388,15 @@ MozQuic::Shutdown(uint16_t code, const char *reason)
   memcpy(plainPkt + used, &tmp16, 2);
   used += 2;
 
+  uint32_t vUsed = 0;
+  EncodeVarint(frameType, plainPkt + used, 8, vUsed);
+  used += vUsed;
+
   size_t reasonLen = strlen(reason);
   if (reasonLen > (mMTU - kTagLen - used - 2)) {
     reasonLen = mMTU - kTagLen - used - 2;
   }
-  uint32_t vUsed = 0;
+  vUsed = 0;
   EncodeVarint(reasonLen, plainPkt + used, 8, vUsed);
   used += vUsed;
   
@@ -1373,7 +1377,7 @@ MozQuic::ClientConnected()
   if (decodeResult != MOZQUIC_OK) {
     assert (errorCode != ERROR_NO_ERROR);
     MaybeSendAck();
-    Shutdown(errorCode, "failed transport parameter verification");
+    Shutdown(errorCode, 0, "failed transport parameter verification");
     RaiseError(decodeResult, (char *) "failed to verify server transport parameters\n");
     return MOZQUIC_ERR_CRYPTO;
   }
@@ -1444,7 +1448,7 @@ MozQuic::ServerConnected()
   if (decodeResult != MOZQUIC_OK) {
     assert(errorCode != ERROR_NO_ERROR);
     MaybeSendAck();
-    Shutdown(errorCode, "failed transport parameter verification");
+    Shutdown(errorCode, 0, "failed transport parameter verification");
     RaiseError(decodeResult, (char *) "failed to verify client transport parameters\n");
     return MOZQUIC_ERR_CRYPTO;
   }
@@ -1706,7 +1710,7 @@ MozQuic::ProcessGeneralDecoded(const unsigned char *pkt, uint32_t pktSize,
 
     case FRAME_TYPE_PATH_RESPONSE:
       // right now we don't generate path_challenge, so this is an error
-      Shutdown(UNSOLICITED_PATH_RESPONSE, "unexpected path response");
+      Shutdown(UNSOLICITED_PATH_RESPONSE, 0, "unexpected path response");
       RaiseError(MOZQUIC_ERR_GENERAL, (char *) "unexpected path response");
       return MOZQUIC_ERR_GENERAL;
       break;
@@ -1746,7 +1750,7 @@ MozQuic::ProcessGeneralDecoded(const unsigned char *pkt, uint32_t pktSize,
 
     case FRAME_TYPE_NEW_CONNECTION_ID:
       if (mPeerCID.Len() == 0) {
-        Shutdown(PROTOCOL_VIOLATION, "unexpected new cid");
+        Shutdown(PROTOCOL_VIOLATION, FRAME_TYPE_NEW_CONNECTION_ID, "unexpected new cid");
         RaiseError(MOZQUIC_ERR_GENERAL, (char *) "unexpected new cid");
         return MOZQUIC_ERR_GENERAL;
       }

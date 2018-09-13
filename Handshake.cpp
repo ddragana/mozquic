@@ -395,7 +395,7 @@ MozQuic::ProcessServerCleartext(unsigned char *pkt, uint32_t pktSize,
 
   if (header.mVersion != mVersion) {
     HandshakeLog1("wrong version\n");
-    Shutdown(ERROR_VERSION_NEGOTIATION, "wrong version\n");
+    Shutdown(ERROR_VERSION_NEGOTIATION, 0, "wrong version\n");
     return MOZQUIC_ERR_GENERAL;
   }
 
@@ -404,7 +404,7 @@ MozQuic::ProcessServerCleartext(unsigned char *pkt, uint32_t pktSize,
   if ((mLocalCID != header.mDestCID) &&
       (!mLocalOmitCID || header.mDestCID.Len())) {
     HandshakeLog1("wrong connection id\n");
-    Shutdown(PROTOCOL_VIOLATION, "wrong connection id\n");
+    Shutdown(PROTOCOL_VIOLATION, 0, "wrong connection id\n");
     return MOZQUIC_ERR_GENERAL;
   }
 
@@ -416,7 +416,7 @@ MozQuic::ProcessServerCleartext(unsigned char *pkt, uint32_t pktSize,
 
   uint32_t rv = ProcessGeneralDecoded(pkt + header.mHeaderSize, pktSize - header.mHeaderSize, sendAck, true);
   if (rv != MOZQUIC_OK) {
-    Shutdown(PROTOCOL_VIOLATION, "handshake decode issue\n");
+    Shutdown(PROTOCOL_VIOLATION, 0, "handshake decode issue\n");
   }
   return rv;
 }
@@ -495,14 +495,14 @@ MozQuic::ProcessClientCleartext(unsigned char *pkt, uint32_t pktSize, LongHeader
 
   if (header.mVersion != mVersion) {
     RaiseError(MOZQUIC_ERR_GENERAL, (char *)"version mismatch\n");
-    Shutdown(PROTOCOL_VIOLATION, "handshake decode issue\n");
+    Shutdown(PROTOCOL_VIOLATION, 0, "handshake decode issue\n");
     return MOZQUIC_ERR_GENERAL;
   }
 
   uint32_t rv = ProcessGeneralDecoded(pkt + header.mHeaderSize,
                                       pktSize - header.mHeaderSize, sendAck, true);
   if (rv != MOZQUIC_OK) {
-    Shutdown(PROTOCOL_VIOLATION, "handshake decode issue\n");
+    Shutdown(PROTOCOL_VIOLATION, 0, "handshake decode issue\n");
   }
   return rv;
 }
