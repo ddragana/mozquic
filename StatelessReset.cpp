@@ -43,29 +43,21 @@ MozQuic::StatelessResetSend(CID &connID, const struct sockaddr *peer)
   unsigned char out[kMaxMTU];
   out[0] = 0x30;
 
-  // dcid
-  for (unsigned int i = 0; i < mPeerCID.Len(); i++) {
+  // Random Octets (160..). This must be at least 20B
+  uint32_t pad = mMTU - 20 - 16 - 1;
+  pad = (random() % pad) & ~0x1; // force even
+  pad += 20;
+  assert((pad + 16 + 1) <= kMaxMTU);
+  assert((pad + 16 + 1) <= mMTU);
+
+  for (unsigned int i = 0; i < pad; i++) {
     out[1 + i] = random() & 0xff;
   }
 
-  // 1 byte packet number
-  out[1 + mPeerCID.Len()] = random() & 0x7f;
-
-  // pad
-  uint32_t pad = mMTU - 16 - mPeerCID.Len() - 2;
-  pad = (random() % pad) & ~0x1; // force even
-  pad = (pad > 0) ? pad : 1;
-  assert((pad + 16 + 2 + mPeerCID.Len()) <= kMaxMTU);
-  assert((pad + 16 + 2 + mPeerCID.Len()) <= mMTU);
-
-  for (unsigned int i = 0; i < pad; i++) {
-    out[2 + mPeerCID.Len() + i] = random() & 0xff;
-  }
-
   // 16 bytes of reset
-  StatelessResetCalculateToken(mStatelessResetKey, connID, out + 2 + mPeerCID.Len() + pad); // from key and CID
+  StatelessResetCalculateToken(mStatelessResetKey, connID, out + 1 + pad); // from key and CID
 
-  return mSendState->Transmit(0, true, false, false, out, 2 + 16 + mPeerCID.Len() + pad, peer);
+  return mSendState->Transmit(0, true, false, false, out, 1 + 16 + pad, peer);
 }
 
 uint32_t
