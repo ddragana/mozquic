@@ -836,6 +836,7 @@ MozQuic::Intake(bool *partialResult)
   bool sendAck;
   unsigned char *coalescingLeftoverPtr = nullptr;
   uint32_t coalescingLeftoverSize = 0;
+  CID coalescingDestCID;
 
   do {
     unsigned char pktReal1[kMozQuicMSS];
@@ -901,6 +902,11 @@ MozQuic::Intake(bool *partialResult)
         continue;
       }
 
+      if (coalescingDestCID && (coalescingDestCID != longHeader.mDestCID)) {
+        rv = MOZQUIC_ERR_GENERAL;
+        continue;
+      }
+
       ConnectionLogCID5(&longHeader.mDestCID, &longHeader.mSourceCID,
                         "LONGFORM PACKET [size=%d] type %X version %X\n",
                         pktSize, longHeader.mType, longHeader.mVersion);
@@ -933,6 +939,7 @@ MozQuic::Intake(bool *partialResult)
           pkt + longHeader.mHeaderSize + longHeader.mPayloadLen;
         coalescingLeftoverSize =
           pktSize - longHeader.mHeaderSize - longHeader.mPayloadLen;
+        coalescingDestCID = longHeader.mDestCID;
       }
 
       if (longHeader.mType != PACKET_TYPE_0RTT_PROTECTED) {
