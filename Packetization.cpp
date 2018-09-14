@@ -672,9 +672,10 @@ LongHeaderData::LongHeaderData(MozQuic *mq, unsigned char *pkt, uint32_t pktSize
     if (mVersion) {
       uint32_t used;
 
-      // payload Length
+      // payload + pnLen Length
+      uint32_t length = 0;
       if (MozQuic::DecodeVarintMax32(pkt + offset,
-                                     pktSize - offset, mPayloadLen, used) != MOZQUIC_OK) {
+                                     pktSize - offset, length, used) != MOZQUIC_OK) {
         break;
       }
       offset += used;
@@ -686,17 +687,22 @@ LongHeaderData::LongHeaderData(MozQuic *mq, unsigned char *pkt, uint32_t pktSize
         mPacketNumber = ShortHeaderData::DecodePacketNumber(mq,
                                                             pktType == PACKET_TYPE_0RTT_PROTECTED ? kDecrypt0RTT : kDecryptHandshake,
                                                             pkt + offset, nextPN,
-                                                            pktSize - offset, pnLen);
+                                                            length - offset, pnLen);// A single UDP packet can
+                                                                                    // contain multiple long header packets.
+                                                                                    // therefore we use length instead of pktSize.
       } else if (pktType == PACKET_TYPE_INITIAL) {
         mPacketNumber = DecodePacketNumber(pkt + offset, nextPN,
-                                           pktSize - offset, pnLen);
+                                           length - offset, pnLen); // A single UDP packet can
+                                                                    // contain multiple long header packets.
+                                                                    // therefore we use length instead of pktSize.
       } else {
         mPacketNumber = 0;
         pnLen = 1;
       }
       offset += pnLen;
+      mPayloadLen = length - pnLen; // For the long header, length field includes packet number field as well
     }
-        
+
     mHeaderSize = offset;
 
     // Assigning the type makes it OK

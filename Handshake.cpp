@@ -124,7 +124,7 @@ MozQuic::FlushStream0(bool forceAck)
   if (rv != MOZQUIC_OK) return rv;
   framePtr += used;
 
-  unsigned char *payloadLenPtr = framePtr;
+  unsigned char *lengthPtr = framePtr;
   if ((endpkt - framePtr) < 2) {
     return MOZQUIC_ERR_GENERAL;
   }
@@ -182,10 +182,10 @@ MozQuic::FlushStream0(bool forceAck)
     uint32_t headerLen = emptyFramePtr - pkt;
 
     // fill in payload length with expected cipherLen
-    uint16_t payloadLen = (uint16_t)(framePtr - emptyFramePtr) + 16;;
-    payloadLen |= 0x4000;
-    payloadLen = htons(payloadLen);
-    memcpy(payloadLenPtr, &payloadLen, 2);
+    uint16_t length = (uint16_t)(framePtr - emptyFramePtr) + 16 + pnLen;
+    length |= 0x4000;
+    length = htons(length);
+    memcpy(lengthPtr, &length, 2);
     memcpy(cipherPkt, pkt, headerLen);
 
     assert(mHandshakeCID);

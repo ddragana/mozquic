@@ -991,11 +991,11 @@ StreamState::FlushOnce(bool forceAck, bool forceFrame, bool &outWritten)
   uint32_t mtu = mMozQuic->mMTU;
   assert(mtu <= kMaxMTU);
 
-  unsigned char *payloadLenPtr = nullptr;
+  unsigned char *lengthPtr = nullptr;
   unsigned char *pnPtr = nullptr;
   if (mMozQuic->GetConnectionState() == CLIENT_STATE_0RTT) {
     mMozQuic->Create0RTTLongPacketHeader(plainPkt, mtu - kTagLen, headerLen,
-                                         &payloadLenPtr, &pnPtr);
+                                         &lengthPtr, &pnPtr);
   } else if ((mMozQuic->GetConnectionState() != SERVER_STATE_CONNECTED) &&
              (mMozQuic->GetConnectionState() != SERVER_STATE_0RTT) &&
              (mMozQuic->GetConnectionState() != CLIENT_STATE_CONNECTED)) {
@@ -1037,26 +1037,33 @@ StreamState::FlushOnce(bool forceAck, bool forceFrame, bool &outWritten)
     return MOZQUIC_OK;
   }
 
-  if (payloadLenPtr) {
-    uint16_t payloadLen = (framePtr - (plainPkt + headerLen)) + 16;
-    if (payloadLen > 16383) {
+  if (lengthPtr) {
+    size_t pnLen = 4;
+    if ((*pnPtr & 0x80) == 0) {
+      pnLen = 1;
+    } else if ((*pnPtr & 0xC0) == 0x80) {
+      pnLen = 2;
+    }
+    uint16_t length = (framePtr - (plainPkt + headerLen)) + 16 + pnLen;
+    if (length > 16383) {
       return MOZQUIC_ERR_GENERAL;
     }
     // make it a 2 byte varint
-    payloadLenPtr[0] = 0x40 | (payloadLen & 0xff00);
-    payloadLenPtr[1] = payloadLen & 0xff;
+    length |= 0x4000;
+    length = htons(length);
+    memcpy(lengthPtr, &length, 2);
   }
     
   uint32_t bytesOut = 0;
   bool bareAck = framePtr == (plainPkt + headerLen);
   uint32_t rv = mMozQuic->ProtectedTransmit(plainPkt, headerLen, pnPtr,
                                             plainPkt + headerLen, framePtr - (plainPkt + headerLen),
-                                            mtu - headerLen - kTagLen, !payloadLenPtr, !bareAck,
+                                            mtu - headerLen - kTagLen, !lengthPtr, !bareAck,
                                             packet->mQueueOnTransmit, 0, &bytesOut);
   if (rv != MOZQUIC_OK) {
     return rv;
   }
-  assert(!payloadLenPtr || (bytesOut == headerLen + (framePtr - (plainPkt + headerLen)) + 16));
+  assert(!lengthPtr || (bytesOut == headerLen + (framePtr - (plainPkt + headerLen)) + 16));
 
   outWritten = true;
   if (!bareAck && bytesOut) {
