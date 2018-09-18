@@ -20,7 +20,8 @@ enum TransportExtensionID {
   kMaxPacketSize          = 0x5,
   kStatelessResetToken    = 0x6,
   kAckDelayExponent       = 0x7,
-  kInitialMaxUniStreams  = 0x8,
+  kInitialMaxUniStreams   = 0x8,
+  kDisableMigration       = 0x9,
 };
 
 void
@@ -298,6 +299,12 @@ TransportExtension::DecodeClientTransportParameters(unsigned char *input, uint16
           return MOZQUIC_ERR_GENERAL;
         }
         break;
+      case kDisableMigration:
+        if (len != 0) { return MOZQUIC_ERR_GENERAL; }
+          // We do not perform connection migrartion, so we do not need to do anything.
+          Log::sDoLog(Log::CONNECTION, 1, forLogging,
+                      "Server received disable_migration\n");
+        break;
 
       default:
         offset += len;
@@ -490,6 +497,12 @@ TransportExtension::DecodeServerTransportParameters(unsigned char *input, uint16
                       "AckDelayExponent Recvd Too large\n");
           return MOZQUIC_ERR_GENERAL;
         }
+        break;
+      case kDisableMigration:
+        if (len != 0) { return MOZQUIC_ERR_GENERAL; }
+          // We do not perform connection migrartion, so we do not need to do anything.
+          Log::sDoLog(Log::CONNECTION, 1, forLogging,
+                      "Server received disable_migration\n");
         break;
 
       default:

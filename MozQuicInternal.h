@@ -70,6 +70,7 @@ enum transportErrorType {
   ERROR_VERSION_NEGOTIATION = 0x0009,
   PROTOCOL_VIOLATION        = 0x000A,
   UNSOLICITED_PATH_RESPONSE = 0x000B,
+  INVALID_MIGRATION         = 0x000C,
 };
 
 enum httpErrorType {
