@@ -50,7 +50,7 @@ int testEvent9(void *closure, uint32_t event, void *param)
   if (event == MOZQUIC_EVENT_NEW_STREAM_DATA) {
     test_assert(state.state == 2);
     mozquic_stream_t *stream = param;
-    test_assert(mozquic_get_streamid(stream) == 4);
+    test_assert(mozquic_get_streamid(stream) == 0);
     
     uint32_t amt = 0;
     unsigned char buf[500];

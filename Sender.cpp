@@ -44,8 +44,8 @@ Sender::Sender(MozQuic *session)
   , mLastSend(0)
   , mSSThresh(0xffffffff)
   , mEndOfRecovery(0) // a packet number
-{
-}
+  , mEndOfRecoveryPktNumberSpace(PN_SPACE_INITIAL) // pn space of mEndOfRecovery
+{}
 
 void
 Sender::Connected()
@@ -313,7 +313,7 @@ Sender::Transmit(uint64_t packetNumber, bool bareAck, bool clientZeroRTT, bool q
 }
 
 void
-Sender::Ack(uint64_t packetNumber, uint32_t bytes)
+Sender::Ack(uint64_t packetNumber, uint32_t bytes, packetNumberSpace pnSpace)
 {
   if (mWindowUsed >= bytes) {
     mWindowUsed -= bytes;
@@ -321,9 +321,11 @@ Sender::Ack(uint64_t packetNumber, uint32_t bytes)
     mWindowUsed = 0;
   }
 
-  if (packetNumber < mEndOfRecovery) {
-    SenderLog6("Acknowledgment %lX of %ld (now %ld/%ld) [recovery %lX]\n",
-               packetNumber, bytes, mWindowUsed, mWindow, mEndOfRecovery);
+  if ((pnSpace < mEndOfRecoveryPktNumberSpace) ||
+      ((pnSpace == mEndOfRecoveryPktNumberSpace) && (packetNumber < mEndOfRecovery))) {
+    SenderLog6("Acknowledgment %lX of %ld (now %ld/%ld) [recovery %lX %d]\n",
+               packetNumber, bytes, mWindowUsed, mWindow, mEndOfRecovery,
+               mEndOfRecoveryPktNumberSpace);
     return;
   }
 
@@ -352,11 +354,10 @@ Sender::Ack(uint64_t packetNumber, uint32_t bytes)
 }
 
 void
-Sender::ReportLoss(uint64_t packetNumber, uint32_t bytes)
+Sender::ReportLoss(uint64_t packetNumber, uint32_t bytes, packetNumberSpace pnSpace)
 {
-  SenderLog4("Report Loss [%lX] %lu endRecovery=%lX%s\n",
-             packetNumber, bytes, mEndOfRecovery,
-             (mEndOfRecovery >= packetNumber) ? " In Recovery" : "");
+  SenderLog4("Report Loss [%lX %d] %lu endRecovery=%lX %d\n",
+             packetNumber, pnSpace, bytes, mEndOfRecovery, mEndOfRecoveryPktNumberSpace);
 
   if (mWindowUsed >= bytes) {
     mWindowUsed -= bytes;
@@ -364,9 +365,11 @@ Sender::ReportLoss(uint64_t packetNumber, uint32_t bytes)
     mWindowUsed = 0;
   }
 
-  if (mEndOfRecovery < packetNumber) {
-    assert(packetNumber <= (mMozQuic->HighestTransmittedAckable()));
-    mEndOfRecovery = mMozQuic->HighestTransmittedAckable();
+  if ((mEndOfRecoveryPktNumberSpace < pnSpace) ||
+      ((mEndOfRecoveryPktNumberSpace == pnSpace) && (mEndOfRecovery < packetNumber))) {
+    assert(packetNumber <= (mMozQuic->HighestTransmittedAckable(pnSpace)));
+    mEndOfRecovery = mMozQuic->HighestTransmittedAckable(pnSpace);
+    mEndOfRecoveryPktNumberSpace = pnSpace;
     mWindow = mWindow >> 1;
     if (mWindow < kMinWindow) {
       mWindow = kMinWindow;

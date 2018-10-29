@@ -37,17 +37,17 @@ static void onConnected(mozquic_connection_t *localConnection)
   mozquic_start_new_stream(&testState.test16_stream[testState.connection - 1][0], localConnection, 0, 0, gbuf, sizeof(gbuf), 0);
   mozquic_send(testState.test16_stream[testState.connection - 1][0], gbuf, sizeof(gbuf), 0);
   mozquic_send(testState.test16_stream[testState.connection - 1][0], gbuf, sizeof(gbuf), 1);
-  test_assert(mozquic_get_streamid(testState.test16_stream[testState.connection - 1][0]) == 4);
+  test_assert(mozquic_get_streamid(testState.test16_stream[testState.connection - 1][0]) == 0);
 
   mozquic_start_new_stream(&testState.test16_stream[testState.connection - 1][1], localConnection, 0, 1, gbuf, sizeof(gbuf), 0);
   mozquic_send(testState.test16_stream[testState.connection - 1][1], gbuf, sizeof(gbuf), 0);
   mozquic_send(testState.test16_stream[testState.connection - 1][1], gbuf, sizeof(gbuf), 1);
-  test_assert(mozquic_get_streamid(testState.test16_stream[testState.connection - 1][1]) == 8);
+  test_assert(mozquic_get_streamid(testState.test16_stream[testState.connection - 1][1]) == 4);
 
   mozquic_start_new_stream(&testState.test16_stream[testState.connection - 1][2], localConnection, 0, 0, gbuf, sizeof(gbuf), 0);
   mozquic_send(testState.test16_stream[testState.connection - 1][2], gbuf, sizeof(gbuf), 0);
   mozquic_send(testState.test16_stream[testState.connection - 1][2], gbuf, sizeof(gbuf), 1);
-  test_assert(mozquic_get_streamid(testState.test16_stream[testState.connection - 1][2]) == 12);
+  test_assert(mozquic_get_streamid(testState.test16_stream[testState.connection - 1][2]) == 8);
 }
 
 int  findStreamIndex(mozquic_stream_t *stream)
@@ -108,15 +108,15 @@ int testEvent16(void *closure, uint32_t event, void *param)
       test_assert((testState.test_state >= 1) &&
                   (testState.test_state <= 3));
       test_assert((streamIndex >= 0) && (streamIndex <= 2));
-      test_assert((mozquic_get_streamid(stream) == 4) ||
-                  (mozquic_get_streamid(stream) == 8) ||
-                  (mozquic_get_streamid(stream) == 12));
+      test_assert((mozquic_get_streamid(stream) == 0) ||
+                  (mozquic_get_streamid(stream) == 4) ||
+                  (mozquic_get_streamid(stream) == 8));
     } else {
       test_assert((testState.test_state == 8) ||
                   (testState.test_state == 9));
       test_assert((streamIndex == 0) || (streamIndex == 2));
-      test_assert((mozquic_get_streamid(stream) == 4) ||
-                  (mozquic_get_streamid(stream) == 8));
+      test_assert((mozquic_get_streamid(stream) == 0) ||
+                  (mozquic_get_streamid(stream) == 4));
     }
 
     test_assert(!testState.test16_fin[testState.connection - 1][streamIndex]);

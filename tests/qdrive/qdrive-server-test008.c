@@ -73,8 +73,8 @@ int testEvent8(void *closure, uint32_t event, void *param)
     test_assert(state.state == 2 ||
                 state.state == 3);
     mozquic_stream_t *stream = param;
-    test_assert(mozquic_get_streamid(stream) == 4 ||
-                mozquic_get_streamid(stream) == 8);
+    test_assert(mozquic_get_streamid(stream) == 0 ||
+                mozquic_get_streamid(stream) == 4);
 
     uint32_t amt = 0;
     unsigned char buf[760];
@@ -83,7 +83,7 @@ int testEvent8(void *closure, uint32_t event, void *param)
     uint32_t code = mozquic_recv(stream, buf, sizeof(buf), &amt, &fin);
     test_assert(code == MOZQUIC_OK);
     int *finptr;
-    if(mozquic_get_streamid(stream) == 4) {
+    if(mozquic_get_streamid(stream) == 0) {
       state.read1 += amt;
       finptr = &state.fin1;
     } else {

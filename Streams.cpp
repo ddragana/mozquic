@@ -28,14 +28,25 @@ namespace mozquic  {
 #define StreamLog9(...) Log::sDoLog(Log::STREAM, 9, mMozQuic, __VA_ARGS__);
 #define StreamLog10(...) Log::sDoLog(Log::STREAM, 10, mMozQuic, __VA_ARGS__);
 
+#define CryptoLog1(...) Log::sDoLog(Log::CRYPTO, 1, mMozQuic, __VA_ARGS__);
+#define CryptoLog2(...) Log::sDoLog(Log::CRYPTO, 1, mMozQuic, __VA_ARGS__);
+#define CryptoLog3(...) Log::sDoLog(Log::CRYPTO, 1, mMozQuic, __VA_ARGS__);
+#define CryptoLog4(...) Log::sDoLog(Log::CRYPTO, 1, mMozQuic, __VA_ARGS__);
+#define CryptoLog5(...) Log::sDoLog(Log::CRYPTO, 1, mStreamState->mMozQuic, __VA_ARGS__);
+#define CryptoLog6(...) Log::sDoLog(Log::CRYPTO, 1, mMozQuic, __VA_ARGS__);
+#define CryptoLog7(...) Log::sDoLog(Log::CRYPTO, 1, mMozQuic, __VA_ARGS__);
+#define CryptoLog8(...) Log::sDoLog(Log::CRYPTO, 1, mMozQuic, __VA_ARGS__);
+#define CryptoLog9(...) Log::sDoLog(Log::CRYPTO, 1, mMozQuic, __VA_ARGS__);
+#define CryptoLog10(...) Log::sDoLog(Log::CRYPTO, 1, mMozQuic, __VA_ARGS__);
+
 uint32_t
 StreamState::StartNewStream(StreamPair **outStream, StreamType streamType,
                             bool no_replay, const void *data, uint32_t amount,
                             bool fin)
 {
   if ((mMozQuic->GetConnectionState() != CLIENT_STATE_CONNECTED) &&
-      (mMozQuic->GetConnectionState() != CLIENT_STATE_0RTT) &&
-      (mMozQuic->GetConnectionState() != SERVER_STATE_CONNECTED)) {
+      (mMozQuic->GetConnectionState() != SERVER_STATE_CONNECTED) &&
+      !mMozQuic->SendingEarlyData()) {
     return MOZQUIC_ERR_IO;
   }
 
@@ -52,7 +63,8 @@ StreamState::StartNewStream(StreamPair **outStream, StreamType streamType,
   }
 
   std::shared_ptr<StreamPair> tmp(new StreamPair(mNextStreamID[streamType], mMozQuic, this,
-                                                 mPeerMaxStreamData, mLocalMaxStreamData, no_replay));
+                                                 mPeerMaxStreamDataBidiLocal,
+                                                 mLocalMaxStreamDataBidiLocal, no_replay));
   mStreams.insert( { mNextStreamID[streamType], tmp } );
   *outStream = tmp.get();
 
@@ -67,7 +79,19 @@ StreamState::StartNewStream(StreamPair **outStream, StreamType streamType,
 bool
 StreamState::IsAllAcked()
 {
-  return (!AnyUnackedPackets()) && mConnUnWritten.empty();
+  for (int i = 0; i < kPacketNumberSpaceCount; i++) {
+    if (!mConnUnWritten[i].empty()) {
+      return false;
+    }
+    for (auto pkt = mUnAckedPackets[i].begin();
+         pkt != mUnAckedPackets[i].end();
+         pkt++) {
+      if (!(*pkt)->mFrameList.empty()) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 uint32_t
@@ -95,7 +119,10 @@ StreamState::MakeSureStreamCreated(uint32_t streamID)
       addedStream = true;
       std::shared_ptr<StreamPair> tmp(new StreamPair(mNextRecvStreamIDUsed[streamType],
                                                      mMozQuic, this,
-                                                     mPeerMaxStreamData, mLocalMaxStreamData,
+                                                     (streamType == BIDI_STREAM) ? mPeerMaxStreamDataBidiRemote
+                                                                                 : mPeerMaxStreamDataUni,
+                                                     (streamType == BIDI_STREAM) ?  mLocalMaxStreamDataBidiRemote
+                                                                                 : mLocalMaxStreamDataUni,
                                                      false));
       mStreams.insert( { mNextRecvStreamIDUsed[streamType], tmp } );
       mNextRecvStreamIDUsed[streamType] += 4;
@@ -171,7 +198,7 @@ StreamState::DeleteDoneStreams()
 bool
 StreamState::MaybeDeleteStream(uint32_t streamID)
 {
-  if (mMozQuic->GetConnectionState() == CLIENT_STATE_0RTT) {
+  if (mMozQuic->SendingEarlyData()) {
     // Do not delete streams during 0RTT, maybe we need to restart them.
     return false;
   }
@@ -188,7 +215,7 @@ StreamState::MaybeDeleteStream(uint32_t streamID)
 }
 
 uint32_t
-StreamState::HandleStreamFrame(FrameHeaderData *result, bool fromCleartext,
+StreamState::HandleStreamFrame(FrameHeaderData *result,
                                const unsigned char *pkt, const unsigned char *endpkt,
                                uint32_t &_ptr)
 {
@@ -197,14 +224,6 @@ StreamState::HandleStreamFrame(FrameHeaderData *result, bool fromCleartext,
              result->u.mStream.mDataLen,
              result->u.mStream.mOffset,
              result->u.mStream.mFinBit);
-
-  if (!result->u.mStream.mStreamID && result->u.mStream.mFinBit) {
-    if (!fromCleartext) {
-      mMozQuic->Shutdown(PROTOCOL_VIOLATION, FRAME_TYPE_STREAM, "fin not allowed on stream 0\n");
-    }
-    mMozQuic->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "fin not allowed on stream 0\n");
-    return MOZQUIC_ERR_GENERAL;
-  }
 
   if (IsSendOnlyStream(result->u.mStream.mStreamID)) {
     mMozQuic->Shutdown(PROTOCOL_VIOLATION, FRAME_TYPE_STREAM, "received data on a local uni-stream.\n");
@@ -224,31 +243,18 @@ StreamState::HandleStreamFrame(FrameHeaderData *result, bool fromCleartext,
                          result->u.mStream.mDataLen,
                          result->u.mStream.mFinBit));
   uint32_t rv = MOZQUIC_OK;
-  if (!result->u.mStream.mStreamID) {
-    mStream0->Supply(tmp);
-  } else {
-    if (fromCleartext) {
-      mMozQuic->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "cleartext non 0 stream id\n");
-      return MOZQUIC_ERR_GENERAL;
-    }
-    rv = FindStream(result->u.mStream.mStreamID, tmp);
-  }
+
+  rv = FindStream(result->u.mStream.mStreamID, tmp);
+
   _ptr += result->u.mStream.mDataLen;
   return rv;
 }
 
 uint32_t
-StreamState::HandleMaxStreamDataFrame(FrameHeaderData *result, bool fromCleartext,
+StreamState::HandleMaxStreamDataFrame(FrameHeaderData *result,
                                       const unsigned char *pkt, const unsigned char *endpkt,
                                       uint32_t &_ptr)
 {
-  if (fromCleartext) {
-    mMozQuic->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "max stream data frames not allowed in cleartext\n");
-    return MOZQUIC_ERR_GENERAL;
-  }
-
-  uint32_t streamID = result->u.mMaxStreamData.mStreamID;
-
   if (IsRecvOnlyStream(result->u.mMaxStreamData.mStreamID)) {
     mMozQuic->Shutdown(PROTOCOL_VIOLATION, FRAME_TYPE_STREAM, "received maxstreamdata on a recv only stream.\n");
     mMozQuic->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "received maxstreamdata on a recv only stream.\n");
@@ -262,27 +268,27 @@ StreamState::HandleMaxStreamDataFrame(FrameHeaderData *result, bool fromCleartex
     return MOZQUIC_ERR_GENERAL;
   }
 
-  uint32_t rv = MakeSureStreamCreated(streamID);
+  uint32_t rv = MakeSureStreamCreated(result->u.mMaxStreamData.mStreamID);
 
   if (rv != MOZQUIC_OK) {
     return rv;
   }
 
-  auto i = mStreams.find(streamID);
+  auto i = mStreams.find(result->u.mMaxStreamData.mStreamID);
   if (i == mStreams.end()) {
     StreamLog4("cannot find streamid %d for max stream data frame. pehaps closed.\n",
-               streamID);
+               result->u.mMaxStreamData.mStreamID);
     return MOZQUIC_OK;
   }
 
   StreamLog5("recvd max stream data id=%X offset=%ld current limit=%ld\n",
-             streamID,
+             result->u.mMaxStreamData.mStreamID,
              result->u.mMaxStreamData.mMaximumStreamData,
              i->second->mOut->mFlowControlLimit);
   if (i->second->mOut->mFlowControlLimit < result->u.mMaxStreamData.mMaximumStreamData) {
     i->second->mOut->mFlowControlLimit = result->u.mMaxStreamData.mMaximumStreamData;
     if (i->second->mOut->mBlocked) {
-      StreamLog5("stream %X has blocked, unblocke it.\n", streamID);
+      StreamLog5("stream %X has blocked, unblocke it.\n", result->u.mMaxStreamData.mStreamID);
       // The stream was blocked on the flow control, unblocked it and continue
       // writing if there are data to write.
       i->second->mOut->mBlocked = false;
@@ -295,15 +301,10 @@ StreamState::HandleMaxStreamDataFrame(FrameHeaderData *result, bool fromCleartex
 }
 
 uint32_t
-StreamState::HandleMaxDataFrame(FrameHeaderData *result, bool fromCleartext,
+StreamState::HandleMaxDataFrame(FrameHeaderData *result,
                                 const unsigned char *pkt, const unsigned char *endpkt,
                                 uint32_t &_ptr)
 {
-  if (fromCleartext) {
-    mMozQuic->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "max data frames not allowed in cleartext\n");
-    return MOZQUIC_ERR_GENERAL;
-  }
-
   StreamLog5("recvd max data current %ld new %ld\n",
              mPeerMaxData, result->u.mMaxData.mMaximumData);
   if (result->u.mMaxData.mMaximumData > mPeerMaxData) {
@@ -319,15 +320,10 @@ StreamState::HandleMaxDataFrame(FrameHeaderData *result, bool fromCleartext,
 }
 
 uint32_t
-StreamState::HandleMaxStreamIDFrame(FrameHeaderData *result, bool fromCleartext,
+StreamState::HandleMaxStreamIDFrame(FrameHeaderData *result,
                                     const unsigned char *pkt, const unsigned char *endpkt,
                                     uint32_t &_ptr)
 {
-  if (fromCleartext) {
-    mMozQuic->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "max stream id frames not allowed in cleartext\n");
-    return MOZQUIC_ERR_GENERAL;
-  }
-
   StreamType streamType = GetStreamType(result->u.mMaxStreamID.mMaximumStreamID);
   StreamLog5("recvd max %s stream id current %d new %d\n",
              (streamType == BIDI_STREAM) ? "bidi" : "uni",
@@ -348,73 +344,46 @@ StreamState::HandleMaxStreamIDFrame(FrameHeaderData *result, bool fromCleartext,
 }
 
 uint32_t
-StreamState::HandleStreamBlockedFrame(FrameHeaderData *result, bool fromCleartext,
+StreamState::HandleStreamBlockedFrame(FrameHeaderData *result,
                                       const unsigned char *pkt, const unsigned char *endpkt,
                                       uint32_t &_ptr)
 {
-  if (fromCleartext) {
-    mMozQuic->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "stream blocked frames not allowed in cleartext\n");
-    return MOZQUIC_ERR_GENERAL;
-  }
-
-  uint32_t streamID = result->u.mStreamBlocked.mStreamID;
-
   if (IsSendOnlyStream(result->u.mStreamBlocked.mStreamID)) {
     mMozQuic->Shutdown(PROTOCOL_VIOLATION, FRAME_TYPE_STREAM, "received streamblocked on a local uni-stream.\n");
     mMozQuic->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "received streamblocked on a local uni-stream.\n");
     return MOZQUIC_ERR_GENERAL;
   }
 
-  StreamLog2("recvd stream blocked id=%X\n", streamID);
+  StreamLog2("recvd stream blocked id=%X\n", result->u.mStreamBlocked.mStreamID);
   return MOZQUIC_OK;
 }
 
 uint32_t
-StreamState::HandleBlockedFrame(FrameHeaderData *result, bool fromCleartext,
+StreamState::HandleBlockedFrame(FrameHeaderData *result,
                                 const unsigned char *pkt, const unsigned char *endpkt,
                                 uint32_t &_ptr)
 {
-  if (fromCleartext) {
-    mMozQuic->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "blocked frames not allowed in cleartext\n");
-    return MOZQUIC_ERR_GENERAL;
-  }
-
   StreamLog2("recvd connection blocked\n");
   return MOZQUIC_OK;
 }
 
 uint32_t
-StreamState::HandleStreamIDBlockedFrame(FrameHeaderData *result, bool fromCleartext,
+StreamState::HandleStreamIDBlockedFrame(FrameHeaderData *result,
                                         const unsigned char *pkt, const unsigned char *endpkt,
                                         uint32_t &_ptr)
 {
-  if (fromCleartext) {
-    mMozQuic->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "streamidblocked frames not allowed in cleartext\n");
-    return MOZQUIC_ERR_GENERAL;
-  }
-
   StreamLog2("recvd streamidblocked\n");
   return MOZQUIC_OK;
 }
 
 uint32_t
-StreamState::HandleResetStreamFrame(FrameHeaderData *result, bool fromCleartext,
+StreamState::HandleResetStreamFrame(FrameHeaderData *result,
                                     const unsigned char *pkt, const unsigned char *endpkt,
                                     uint32_t &)
 {
-  if (fromCleartext) {
-    mMozQuic->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "rst_stream frames not allowed in cleartext\n");
-    return MOZQUIC_ERR_GENERAL;
-  }
   StreamLog5("recvd rst_stream id=%X err=%X, offset=%ld\n",
              result->u.mRstStream.mStreamID, result->u.mRstStream.mErrorCode,
              result->u.mRstStream.mFinalOffset);
-
-  if (!result->u.mRstStream.mStreamID) {
-    mMozQuic->Shutdown(PROTOCOL_VIOLATION, FRAME_TYPE_RST_STREAM, "rst_stream frames not allowed on stream 0\n");
-    mMozQuic->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "rst_stream frames not allowed on stream 0\n");
-    return MOZQUIC_ERR_GENERAL;
-  }
 
   if (IsSendOnlyStream(result->u.mRstStream.mStreamID)) {
     mMozQuic->Shutdown(PROTOCOL_VIOLATION, FRAME_TYPE_RST_STREAM, "rst_stream frames not allowed on send only stream\n");
@@ -457,15 +426,10 @@ StreamIn::HandleResetStream(uint64_t finalOffset)
 }
 
 uint32_t
-StreamState::HandleStopSendingFrame(FrameHeaderData *result, bool fromCleartext,
+StreamState::HandleStopSendingFrame(FrameHeaderData *result,
                                     const unsigned char *pkt, const unsigned char *endpkt,
                                     uint32_t &)
 {
-  if (fromCleartext) {
-    mMozQuic->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "stop_sending frames not allowed in cleartext\n");
-    return MOZQUIC_ERR_GENERAL;
-  }
-
   if (IsRecvOnlyStream(result->u.mStopSending.mStreamID)) {
     mMozQuic->Shutdown(PROTOCOL_VIOLATION, FRAME_TYPE_STOP_SENDING, "received stopSending on wrong uni-stream.\n");
     mMozQuic->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "received stopSending on wrong uni-stream.\n");
@@ -502,10 +466,10 @@ uint32_t
 StreamState::ScrubUnWritten(uint32_t streamID)
 {
   bool foundDataPkt = false; // this is just for testing that we do not write on uni-stream from a peer.
-  for (auto iter = mConnUnWritten.begin(); iter != mConnUnWritten.end();) {
+  for (auto iter = mConnUnWritten[PN_SPACE_01RTT].begin(); iter != mConnUnWritten[PN_SPACE_01RTT].end();) {
     auto chunk = (*iter).get();
     if (chunk->mStreamID == streamID && chunk->mType != ReliableData::kRstStream) {
-      iter = mConnUnWritten.erase(iter);
+      iter = mConnUnWritten[PN_SPACE_01RTT].erase(iter);
       StreamLog6("scrubbing chunk %p of unwritten id %d\n",
                  chunk, streamID);
       foundDataPkt = true;
@@ -514,7 +478,8 @@ StreamState::ScrubUnWritten(uint32_t streamID)
     }
   }
 
-  for (auto packetIter = mUnAckedPackets.begin(); packetIter != mUnAckedPackets.end(); packetIter++) {
+  for (auto packetIter = mUnAckedPackets[PN_SPACE_01RTT].begin();
+       packetIter != mUnAckedPackets[PN_SPACE_01RTT].end(); packetIter++) {
     for (auto frameIter = (*packetIter)->mFrameList.begin();
          frameIter != (*packetIter)->mFrameList.end(); ) {
       if ((*frameIter)->mStreamID == streamID &&
@@ -544,11 +509,11 @@ StreamState::Reset0RTTData()
   // We also start with the oldest sent(easier to delete data without
   // a revert-iterator to iterator conversion).
 
-  auto iter1 = mUnAckedPackets.begin();
-  while (iter1 != mUnAckedPackets.end()) {
+  auto iter1 = mUnAckedPackets[PN_SPACE_01RTT].begin();
+  while (iter1 != mUnAckedPackets[PN_SPACE_01RTT].end()) {
     auto iter2 = (*iter1).get()->mFrameList.begin();
     while (iter2 != (*iter1).get()->mFrameList.end()) {
-      if ((*iter2)->mType == ReliableData::kStream && (*iter2)->mStreamID) {
+      if ((*iter2)->mType == ReliableData::kStream) {
         auto i = mStreams.find((*iter2)->mStreamID);
         assert (i != mStreams.end());
 
@@ -575,20 +540,20 @@ StreamState::Reset0RTTData()
       }
     }
     if ((*iter1).get()->mFrameList.empty()) {
-      iter1 = mUnAckedPackets.erase(iter1);
+      iter1 = mUnAckedPackets[PN_SPACE_01RTT].erase(iter1);
     } else {
       iter1++;
     }
   }
 
-  auto iter3 = mConnUnWritten.begin();
-  while (iter3 != mConnUnWritten.end()) {
+  auto iter3 = mConnUnWritten[PN_SPACE_01RTT].begin();
+  while (iter3 != mConnUnWritten[PN_SPACE_01RTT].end()) {
     if ((*iter3)->mType == ReliableData::kStream && (*iter3)->mStreamID) {
       auto i = mStreams.find((*iter3)->mStreamID);
       assert (i != mStreams.end());
 
       std::unique_ptr<ReliableData> x(std::move(*iter3));
-      iter3 = mConnUnWritten.erase(iter3);
+      iter3 = mConnUnWritten[PN_SPACE_01RTT].erase(iter3);
 
       if ((*i).second->mOut->mStreamUnWritten.empty()) {
         (*i).second->mOut->mStreamUnWritten.push_front(std::move(x));
@@ -613,7 +578,7 @@ StreamState::Reset0RTTData()
 
   // Delete "no_replay" streams and renumber the rest.
   for (int type = 0; type < 2; type++) {
-    uint32_t nextStreamID = !type ? 4 : 2;
+    uint32_t nextStreamID = !type ? 0 : 2;
     for (uint32_t streamID = nextStreamID; streamID < mNextStreamID[type]; streamID += 4) {
       auto streamPair = mStreams[streamID];
       assert(streamPair->mStreamID == streamID);
@@ -641,8 +606,7 @@ uint64_t
 StreamState::CalculateConnectionCharge(ReliableData *data, StreamOut *out)
 {
   uint64_t newConnectionCharge = 0;
-  if (data->mStreamID &&
-      (data->mOffset + data->mLen > out->mOffsetChargedToConnFlowControl)) {
+  if (data->mOffset + data->mLen > out->mOffsetChargedToConnFlowControl) {
     newConnectionCharge = data->mOffset + data->mLen - out->mOffsetChargedToConnFlowControl;
   }
   return newConnectionCharge;
@@ -653,10 +617,8 @@ StreamState::FlowControlPromotionForStreamPair(StreamOut *out)
 {
   for (auto iBuffer = out->mStreamUnWritten.begin();
        iBuffer != out->mStreamUnWritten.end(); ) {
-
     uint64_t newConnectionCharge = 0;
     if ((*iBuffer)->mLen) {
-
       newConnectionCharge = CalculateConnectionCharge((*iBuffer).get(), out);
 
       if (newConnectionCharge) {
@@ -673,7 +635,7 @@ StreamState::FlowControlPromotionForStreamPair(StreamOut *out)
           iBuffer++;
           continue;
         }
-      
+
         if (mMaxDataSent + newConnectionCharge > mPeerMaxData) {
           // split buffer
           uint64_t minCharge = 1; // for hypothetical 1 byte frame
@@ -710,11 +672,10 @@ StreamState::FlowControlPromotionForStreamPair(StreamOut *out)
           auto iterReg = iBuffer++;
           out->mStreamUnWritten.insert(iBuffer, std::move(tmp));
           iBuffer = iterReg;
-
           newConnectionCharge = CalculateConnectionCharge((*iBuffer).get(), out);
         }
       }
-            
+
       if ((*iBuffer)->mOffset >= out->mFlowControlLimit) {
         if (!out->mBlocked) {
           StreamLog2("Stream %d BLOCKED flow control\n", (*iBuffer)->mStreamID);
@@ -726,6 +687,7 @@ StreamState::FlowControlPromotionForStreamPair(StreamOut *out)
         iBuffer++;
         continue;
       }
+
       if ((*iBuffer)->mOffset + (*iBuffer)->mLen > out->mFlowControlLimit) {
         // need to split it!
 
@@ -749,7 +711,7 @@ StreamState::FlowControlPromotionForStreamPair(StreamOut *out)
         newConnectionCharge = CalculateConnectionCharge((*iBuffer).get(), out);
       }
     }
-  
+
     assert((*iBuffer)->mOffset + (*iBuffer)->mLen <= out->mFlowControlLimit);
     out->mOffsetChargedToConnFlowControl += newConnectionCharge;
     mMaxDataSent += newConnectionCharge;
@@ -760,12 +722,13 @@ StreamState::FlowControlPromotionForStreamPair(StreamOut *out)
     StreamLog6("promoting chunk stream %d %ld.%d [stream limit=%ld] [conn limit %llu of %lld]\n",
                (*iBuffer)->mStreamID, (*iBuffer)->mOffset, (*iBuffer)->mLen,
                out->mFlowControlLimit, mds, pmd);
+
     assert((*iBuffer)->mOffset + (*iBuffer)->mLen <= out->mFlowControlLimit);
     std::unique_ptr<ReliableData> x(std::move(*iBuffer));
-    mConnUnWritten.push_back(std::move(x));
-
+    mConnUnWritten[PN_SPACE_01RTT].push_back(std::move(x));
     iBuffer = out->mStreamUnWritten.erase(iBuffer);
   }
+
   return MOZQUIC_OK;
 }
 
@@ -778,25 +741,20 @@ StreamState::FlowControlPromotion()
 {
   while (!mStreamsReadyToWrite.empty()) {
     auto streamID = mStreamsReadyToWrite.front();
-    if (!streamID) {
-      FlowControlPromotionForStreamPair(mStream0.get()->mOut.get());
-      if (mStream0->mOut->mStreamUnWritten.empty()) {
-        mStreamsReadyToWrite.pop_front();
-      }
-    } else {
-      assert(IsBidiStream(streamID) || IsLocalStream(streamID)); // We cannot write to a peer's uni stream.
-      auto streamPair = mStreams[streamID];
-      FlowControlPromotionForStreamPair(streamPair.get()->mOut.get());
+    assert(IsBidiStream(streamID) || IsLocalStream(streamID)); // We cannot write to a peer's uni stream.
+    auto streamPair = mStreams[streamID];
+    FlowControlPromotionForStreamPair(streamPair.get()->mOut.get());
 
-      if (MaybeDeleteStream(streamPair->mStreamID) ||
-          streamPair->mOut->mBlocked || streamPair->mOut->mStreamUnWritten.empty()) {
-        mStreamsReadyToWrite.pop_front();
-      }
+    if (MaybeDeleteStream(streamPair->mStreamID) ||
+        streamPair->mOut->mBlocked || streamPair->mOut->mStreamUnWritten.empty()) {
+      mStreamsReadyToWrite.pop_front();
     }
+
     if (mMaxDataBlocked) {
       return MOZQUIC_OK;
     }
   }
+
   return MOZQUIC_OK;
 }
 
@@ -805,9 +763,6 @@ StreamState::MaybeIssueFlowControlCredit()
 {
   // todo something better than polling
   ConnectionReadBytes(0);
-  if (mStream0) {
-    mStream0->mIn->MaybeIssueFlowControlCredit();
-  }
   for (auto iStreamPair = mStreams.begin(); iStreamPair != mStreams.end(); iStreamPair++) {
     if (IsBidiStream(iStreamPair->second->mStreamID) ||
         IsPeerStream(iStreamPair->second->mStreamID)) {
@@ -827,55 +782,65 @@ StreamState::MaybeIssueFlowControlCredit()
 }
 
 uint32_t
-StreamState::CreateFrames(unsigned char *&aFramePtr, const unsigned char *endpkt, bool justZero,
+StreamState::CreateFrames(unsigned char *&aFramePtr, const unsigned char *endpkt, keyPhase kp,
                           TransmittedPacket *transmittedPacket)
 {
-  auto iter = mConnUnWritten.begin();
-  while (iter != mConnUnWritten.end()) {
+  packetNumberSpace pnSpace = MozQuic::KeyPhaseToPacketNumberSpace(kp);
+  auto iter = mConnUnWritten[pnSpace].begin();
+  while (iter != mConnUnWritten[pnSpace].end()) {
     unsigned char *framePtr = aFramePtr;
+
     if (framePtr == endpkt) {
       break;
     }
-    if (justZero && (((*iter)->mType != ReliableData::kStream)|| (*iter)->mStreamID)) {
-      iter++;
-      continue;
-    }
-    if ((*iter)->mType == ReliableData::kRstStream) {
+    if ((*iter)->mType == ReliableData::kCrypto) {
+      if (CreateCryptoFrame(pnSpace, framePtr, endpkt, iter)  != MOZQUIC_OK) {
+        break;
+      }
+    } else if ((*iter)->mType == ReliableData::kRstStream) {
+      assert(pnSpace == PN_SPACE_01RTT);
       if (CreateRstStreamFrame(framePtr, endpkt, (*iter).get()) != MOZQUIC_OK) {
         break;
       }
     } else if ((*iter)->mType == ReliableData::kMaxStreamData) {
+      assert(pnSpace == PN_SPACE_01RTT);
       if (CreateMaxStreamDataFrame(framePtr, endpkt, (*iter).get()) != MOZQUIC_OK) {
         // this one sometimes fails and we should just delete the info and move on
         // as the stream no longer needs flow control
-        iter = mConnUnWritten.erase(iter);
+        iter = mConnUnWritten[PN_SPACE_01RTT].erase(iter);
         continue;
       }
     } else if ((*iter)->mType == ReliableData::kStopSending) {
+      assert(pnSpace == PN_SPACE_01RTT);
       if (CreateStopSendingFrame(framePtr, endpkt, (*iter).get()) != MOZQUIC_OK) {
         break;
       }
     } else if ((*iter)->mType == ReliableData::kMaxData) {
+      assert(pnSpace == PN_SPACE_01RTT);
       if (CreateMaxDataFrame(framePtr, endpkt, (*iter).get()) != MOZQUIC_OK) {
         break;
       }
     } else if ((*iter)->mType == ReliableData::kMaxStreamID) {
+      assert(pnSpace == PN_SPACE_01RTT);
       if (CreateMaxStreamIDFrame(framePtr, endpkt, (*iter).get()) != MOZQUIC_OK) {
         break;
       }
     } else if ((*iter)->mType == ReliableData::kStreamBlocked) {
+      assert(pnSpace == PN_SPACE_01RTT);
       if (CreateStreamBlockedFrame(framePtr, endpkt, (*iter).get()) != MOZQUIC_OK) {
         break;
       }
     } else if ((*iter)->mType == ReliableData::kBlocked) {
+      assert(pnSpace == PN_SPACE_01RTT);
       if (CreateBlockedFrame(framePtr, endpkt, (*iter).get()) != MOZQUIC_OK) {
         break;
       }
     } else if ((*iter)->mType == ReliableData::kStreamIDBlocked) {
+      assert(pnSpace == PN_SPACE_01RTT);
       bool toRemove = false;
       if (CreateStreamIDBlockedFrame(framePtr, endpkt, (*iter).get(), toRemove) != MOZQUIC_OK) {
         if (toRemove) {
-          iter = mConnUnWritten.erase(iter);
+          iter = mConnUnWritten[PN_SPACE_01RTT].erase(iter);
           continue;
         }
         break;
@@ -883,13 +848,14 @@ StreamState::CreateFrames(unsigned char *&aFramePtr, const unsigned char *endpkt
     } else if ((*iter)->mType == ReliableData::kPathResponse) {
       if ((*iter)->mCloned) {
         // don't retransmit path response
-        iter = mConnUnWritten.erase(iter);
+        iter = mConnUnWritten[pnSpace].erase(iter);
         continue;
       }
       if (CreatePathResponseFrame(framePtr, endpkt, (*iter).get()) != MOZQUIC_OK) {
         break;
       }
     } else {
+      assert(pnSpace == PN_SPACE_01RTT);
       assert ((*iter)->mType == ReliableData::kStream);
 
       uint32_t used = 0;
@@ -927,7 +893,7 @@ StreamState::CreateFrames(unsigned char *&aFramePtr, const unsigned char *endpkt
         (*iter)->mFin = false;
         tmp->mFromRTO = (*iter)->mFromRTO;
         auto iterReg = iter++;
-        mConnUnWritten.insert(iter, std::move(tmp));
+        mConnUnWritten[PN_SPACE_01RTT].insert(iter, std::move(tmp));
         iter = iterReg;
       }
       assert(room >= (*iter)->mLen);
@@ -951,13 +917,8 @@ StreamState::CreateFrames(unsigned char *&aFramePtr, const unsigned char *endpkt
       framePtr += (*iter)->mLen;
     }
 
-    if ((mMozQuic->GetConnectionState() == CLIENT_STATE_CONNECTED) ||
-        (mMozQuic->GetConnectionState() == SERVER_STATE_CONNECTED) ||
-        (mMozQuic->GetConnectionState() == CLIENT_STATE_0RTT)) {
-      (*iter)->mTransmitKeyPhase = keyPhase1Rtt;
-    } else {
-      (*iter)->mTransmitKeyPhase = keyPhaseUnprotected;
-    }
+    (*iter)->mTransmitKeyPhase = kp;
+
     if ((*iter)->mFromRTO) {
       transmittedPacket->mFromRTO = true;
     }
@@ -967,7 +928,7 @@ StreamState::CreateFrames(unsigned char *&aFramePtr, const unsigned char *endpkt
 
     // move it to the unacked list
     transmittedPacket->mFrameList.push_back(std::move(*iter));
-    iter = mConnUnWritten.erase(iter);
+    iter = mConnUnWritten[pnSpace].erase(iter);
     aFramePtr = framePtr;
   }
   return MOZQUIC_OK;
@@ -978,11 +939,7 @@ StreamState::FlushOnce(bool forceAck, bool forceFrame, bool &outWritten)
 {
   outWritten = false;
 
-  if (mMozQuic->GetConnectionState() != SERVER_STATE_CONNECTED) {
-    mMozQuic->FlushStream0(forceAck);
-  }
-
-  if (mConnUnWritten.empty() && !forceAck) {
+  if (mConnUnWritten[PN_SPACE_01RTT].empty() && !forceAck) {
     return MOZQUIC_OK;
   }
 
@@ -991,26 +948,30 @@ StreamState::FlushOnce(bool forceAck, bool forceFrame, bool &outWritten)
   uint32_t mtu = mMozQuic->mMTU;
   assert(mtu <= kMaxMTU);
 
+  keyPhase kp;
   unsigned char *lengthPtr = nullptr;
   unsigned char *pnPtr = nullptr;
-  if (mMozQuic->GetConnectionState() == CLIENT_STATE_0RTT) {
-    mMozQuic->Create0RTTLongPacketHeader(plainPkt, mtu - kTagLen, headerLen,
-                                         &lengthPtr, &pnPtr);
-  } else if ((mMozQuic->GetConnectionState() != SERVER_STATE_CONNECTED) &&
-             (mMozQuic->GetConnectionState() != SERVER_STATE_0RTT) &&
-             (mMozQuic->GetConnectionState() != CLIENT_STATE_CONNECTED)) {
+  size_t pnLen;
+  if (mMozQuic->SendingEarlyData()) {
+    mMozQuic->CreateLongPacketHeader(PACKET_TYPE_0RTT_PROTECTED, PN_SPACE_01RTT,
+                                     plainPkt, mtu - kTagLen, headerLen,
+                                     &lengthPtr, &pnPtr, pnLen);
+    kp = keyPhase0Rtt;
+  } else if ((mMozQuic->GetConnectionState() != CLIENT_STATE_CONNECTED) &&
+             (mMozQuic->GetConnectionState() != SERVER_STATE_CONNECTED)) {
     // if 0RTT data gets rejected, wait for the connected state to send data.
     return MOZQUIC_OK;
   } else {
     mMozQuic->CreateShortPacketHeader(plainPkt, mtu - kTagLen, headerLen, &pnPtr);
+    kp = keyPhase1Rtt;
   }
 
   unsigned char *framePtr = plainPkt + headerLen;
   const unsigned char *endpkt = plainPkt + mtu - kTagLen; // reserve 16 for aead tag
-  std::unique_ptr<TransmittedPacket> packet(new TransmittedPacket(mMozQuic->mNextTransmitPacketNumber));
+  std::unique_ptr<TransmittedPacket> packet(new TransmittedPacket(mMozQuic->mNextTransmitPacketNumber[PN_SPACE_01RTT]));
 
   bool makeFrames = false;
-  if (!mConnUnWritten.empty()) {
+  if (!mConnUnWritten[PN_SPACE_01RTT].empty()) {
 
     makeFrames = forceFrame;
 
@@ -1019,32 +980,25 @@ StreamState::FlushOnce(bool forceAck, bool forceFrame, bool &outWritten)
       // nothing is buffered in sender right now
       makeFrames = mMozQuic->mSendState->EmptyQueue() &&
         mMozQuic->mSendState->CanSendNow(kInitialMTU,
-                                         (mMozQuic->GetConnectionState() == CLIENT_STATE_0RTT) ||
-                                         (mMozQuic->GetConnectionState() == SERVER_STATE_0RTT));
+                                         mMozQuic->SendingEarlyData());
     }
     
     // if that didn't work but the first bit of data is probe data (to be unblocked) ignore
     // congestion control limits and do it right now
     if (!makeFrames) {
-      auto iter = mConnUnWritten.begin();
+      auto iter = mConnUnWritten[PN_SPACE_01RTT].begin();
       makeFrames = (*iter)->mSendUnblocked;
     }
   }
 
   if (makeFrames) {
-    CreateFrames(framePtr, endpkt, false, packet.get());
+    CreateFrames(framePtr, endpkt, kp, packet.get());
   } else if (!forceAck) {
     return MOZQUIC_OK;
   }
 
   if (lengthPtr) {
-    size_t pnLen = 4;
-    if ((*pnPtr & 0x80) == 0) {
-      pnLen = 1;
-    } else if ((*pnPtr & 0xC0) == 0x80) {
-      pnLen = 2;
-    }
-    uint16_t length = (framePtr - (plainPkt + headerLen)) + 16 + pnLen;
+    uint16_t length = (framePtr - (plainPkt + headerLen)) + kTagLen + pnLen;
     if (length > 16383) {
       return MOZQUIC_ERR_GENERAL;
     }
@@ -1069,7 +1023,7 @@ StreamState::FlushOnce(bool forceAck, bool forceFrame, bool &outWritten)
   if (!bareAck && bytesOut) {
     packet->mTransmitTime = MozQuic::Timestamp();
     packet->mPacketLen = bytesOut;
-    mUnAckedPackets.push_back(std::move(packet));
+    mUnAckedPackets[PN_SPACE_01RTT].push_back(std::move(packet));
   }
 
   return MOZQUIC_OK;
@@ -1095,7 +1049,7 @@ StreamState::TrackPacket(uint64_t packetNumber, uint32_t packetSize)
   std::unique_ptr<TransmittedPacket> packet(new TransmittedPacket(packetNumber));
   packet->mTransmitTime = MozQuic::Timestamp();
   packet->mPacketLen = packetSize;
-  mUnAckedPackets.push_back(std::move(packet));
+  mUnAckedPackets[PN_SPACE_01RTT].push_back(std::move(packet));
 }
 
 uint32_t
@@ -1105,13 +1059,13 @@ StreamState::ConnectionWrite(std::unique_ptr<ReliableData> &p)
   // transmitted after prioritization by flush()
   assert (mMozQuic->GetConnectionState() != STATE_UNINITIALIZED);
 
-  mConnUnWritten.push_back(std::move(p));
+  mConnUnWritten[PN_SPACE_01RTT].push_back(std::move(p));
 
   return MOZQUIC_OK;
 }
 
 uint32_t
-StreamState::ConnectionWriteNow(std::unique_ptr<ReliableData> &p)
+StreamState::ConnectionWriteNow(std::unique_ptr<ReliableData> &p, packetNumberSpace pnSpace)
 {
   // this data gets queued to front of unwritten and framed and
   // transmitted after prioritization by flush()
@@ -1119,7 +1073,7 @@ StreamState::ConnectionWriteNow(std::unique_ptr<ReliableData> &p)
 
   p->mSendUnblocked = true;
   p->mQueueOnTransmit = true; // this is the post cc queue
-  mConnUnWritten.push_front(std::move(p));
+  mConnUnWritten[pnSpace].push_front(std::move(p));
   Flush(false);
   return MOZQUIC_OK;
 }
@@ -1139,10 +1093,19 @@ StreamState::SignalReadyToWrite(StreamOut *out)
 }
 
 uint32_t
-StreamState::GetIncrement()
+StreamState::GetIncrement(uint32_t streamID)
 {
-  if (mLocalMaxStreamData < 1024 * 1024) {
-    return mLocalMaxStreamData;
+  uint32_t maxStreamData;
+  if (!IsBidiStream(streamID)) {
+    maxStreamData = mLocalMaxStreamDataUni;
+  } else if (IsLocalStream(streamID)) {
+    maxStreamData = mLocalMaxStreamDataBidiLocal;
+  } else {
+    maxStreamData = mLocalMaxStreamDataBidiRemote;
+  }
+
+  if (maxStreamData < 1024 * 1024) {
+    return maxStreamData;
   }
   return 4 * 1024 * 1024; // todo
 }
@@ -1201,15 +1164,14 @@ StreamState::ConnectionReadBytes(uint64_t amt)
 bool
 StreamState::AnyUnackedPackets()
 {
-  if (mUnAckedPackets.empty()) {
-    return false;
-  }
-  for (auto pkt = mUnAckedPackets.begin();
-       pkt != mUnAckedPackets.end();
-       pkt++) {
+  for (int i = 0; i< kPacketNumberSpaceCount; i++) {
+    for (auto pkt = mUnAckedPackets[i].begin();
+         pkt != mUnAckedPackets[i].end();
+         pkt++) {
 
-    if (!(*pkt)->mFrameList.empty()) {
-      return true;
+      if (!(*pkt)->mFrameList.empty()) {
+        return true;
+      }
     }
   }
   
@@ -1220,46 +1182,49 @@ uint32_t
 StreamState::RetransmitOldestUnackedData(bool fromRTO)
 // loss timers use this if there is no new data
 {
-  for (auto packetIter = mUnAckedPackets.begin();
-       packetIter != mUnAckedPackets.end();
-       packetIter++) {
+  for (int i = 0; i < kPacketNumberSpaceCount; i++) {
+    packetNumberSpace pnSpace = (packetNumberSpace)i;
+    for (auto packetIter = mUnAckedPackets[pnSpace].begin();
+         packetIter != mUnAckedPackets[pnSpace].end();
+         packetIter++) {
 
-    if ((*packetIter)->mFrameList.empty()) {
-      continue;
+      if ((*packetIter)->mFrameList.empty()) {
+        continue;
+      }
+
+      for (auto frameIter = (*packetIter)->mFrameList.begin();
+           frameIter != (*packetIter)->mFrameList.end(); frameIter++) {
+        StreamLog4("data associated with packet %lX retransmitted type %d %s not yet lost\n",
+                   (*packetIter)->mPacketNumber, (*frameIter)->mType,
+                   fromRTO ? "RTO-timer" : "TLP-timer");
+        // move the data pointer from iter to tmp
+        std::unique_ptr<ReliableData> tmp(new ReliableData(*(*frameIter)));
+        assert(!(*frameIter)->mData);
+        assert(tmp->mData);
+
+        // its ok to bypass the per out stream flow control window on rexmit
+        tmp->mFromRTO = fromRTO;
+        mConnUnWritten[pnSpace].push_back(std::move(tmp));
+      }
+
+      (*packetIter)->mFrameList.clear();
+      // we do not erase the packet because it is not lost
+      // we do not report it lost because that is done when an ack for the rto
+      // probe is received.
+      return MOZQUIC_OK;
     }
-
-    for (auto frameIter = (*packetIter)->mFrameList.begin();
-         frameIter != (*packetIter)->mFrameList.end(); frameIter++) {
-      StreamLog4("data associated with packet %lX retransmitted type %d %s not yet lost\n",
-                 (*packetIter)->mPacketNumber, (*frameIter)->mType,
-                 fromRTO ? "RTO-timer" : "TLP-timer");
-      // move the data pointer from iter to tmp
-      std::unique_ptr<ReliableData> tmp(new ReliableData(*(*frameIter)));
-      assert(!(*frameIter)->mData);
-      assert(tmp->mData);
-
-      // its ok to bypass the per out stream flow control window on rexmit
-      tmp->mFromRTO = fromRTO;
-      ConnectionWriteNow(tmp);
-    }
-
-    (*packetIter)->mFrameList.clear();
-    // we do not erase the packet because it is not lost
-    // we do not report it lost because that is done when an ack for the rto
-    // probe is received.
-    return MOZQUIC_OK;
   }
   return MOZQUIC_ERR_GENERAL;
 }
 
 uint32_t
-StreamState::ReportLossLessThan(uint64_t packetNumber)
+StreamState::ReportLossLessThan(uint64_t packetNumber, packetNumberSpace pnSpace)
 {
   bool firstTime = true;
-  for (auto packetIter = mUnAckedPackets.begin();
-         (packetIter != mUnAckedPackets.end()) &&
-         ((*packetIter)->mPacketNumber < packetNumber);
-       packetIter = mUnAckedPackets.erase(packetIter)) {
+  for (auto packetIter = mUnAckedPackets[pnSpace].begin();
+       (packetIter != mUnAckedPackets[pnSpace].end()) &&
+       ((*packetIter)->mPacketNumber < packetNumber);
+       packetIter = mUnAckedPackets[pnSpace].erase(packetIter)) {
 
     if (firstTime) {
       StreamLog4("ReportLossLessThan Packet Number %lX\n", packetNumber);
@@ -1267,7 +1232,8 @@ StreamState::ReportLossLessThan(uint64_t packetNumber)
     }
 
     mMozQuic->mSendState->ReportLoss((*packetIter)->mPacketNumber,
-                                     (*packetIter)->mPacketLen);
+                                     (*packetIter)->mPacketLen,
+                                     pnSpace);
 
     if ((*packetIter)->mFrameList.empty()) {
       continue;
@@ -1283,11 +1249,11 @@ StreamState::ReportLossLessThan(uint64_t packetNumber)
       assert(tmp->mData);
       tmp->mFromRTO = false;
       // its ok to bypass the per out stream flow control window on rexmit
-      ConnectionWrite(tmp);
+      mConnUnWritten[pnSpace].push_back(std::move(tmp));
     }
     (*packetIter)->mFrameList.clear();
   }
-  
+
   return MOZQUIC_OK;
 }
 
@@ -1299,7 +1265,6 @@ StreamState::CreateRstStreamFrame(unsigned char *&framePtr, const unsigned char 
              chunk->mOffset, chunk->mStreamID,
              mMozQuic->mNextTransmitPacketNumber);
   assert(chunk->mType == ReliableData::kRstStream);
-  assert(chunk->mStreamID);
   assert(!chunk->mLen);
   assert(IsBidiStream(chunk->mStreamID) || IsLocalStream(chunk->mStreamID) || !chunk->mOffset); // offset on a peer's uni stream must be 0.
   uint32_t used;
@@ -1334,15 +1299,13 @@ StreamState::CreateMaxStreamDataFrame(unsigned char *&framePtr, const unsigned c
   assert(!chunk->mLen);
   assert(IsBidiStream(chunk->mStreamID) || IsPeerStream(chunk->mStreamID)); // we should not send maxdata on a local uni stream.
 
-  if (chunk->mStreamID) {
-    auto i = mStreams.find(chunk->mStreamID);
-    if (i == mStreams.end() ||
-        (*i).second->mIn->mFinRecvd ||
-        (*i).second->mIn->mRstRecvd ||
-        (*i).second->mIn->mLocalMaxStreamData > chunk->mStreamCreditValue) {
-      StreamLog5("not generating max stream data id=%d\n", chunk->mStreamID);
-      return MOZQUIC_ERR_GENERAL;
-    }
+  auto i = mStreams.find(chunk->mStreamID);
+  if (i == mStreams.end() ||
+      (*i).second->mIn->mFinRecvd ||
+      (*i).second->mIn->mRstRecvd ||
+      (*i).second->mIn->mLocalMaxStreamData > chunk->mStreamCreditValue) {
+    StreamLog5("not generating max stream data id=%d\n", chunk->mStreamID);
+    return MOZQUIC_ERR_GENERAL;
   }
 
   framePtr[0] = FRAME_TYPE_MAX_STREAM_DATA;
@@ -1370,7 +1333,6 @@ StreamState::CreateMaxStreamIDFrame(unsigned char *&framePtr, const unsigned cha
              chunk->mMaxStreamID,
              mMozQuic->mNextTransmitPacketNumber);
   assert(chunk->mType == ReliableData::kMaxStreamID);
-  assert(chunk->mMaxStreamID);
   assert(!chunk->mLen);
 
   uint32_t used;
@@ -1390,7 +1352,6 @@ StreamState::CreateStopSendingFrame(unsigned char *&framePtr, const unsigned cha
   StreamLog5("generating stop sending code stream %d %x\n",
              chunk->mStreamID, chunk->mStopSendingCode);
   assert(chunk->mType == ReliableData::kStopSending);
-  assert(chunk->mStreamID);
   assert(!chunk->mLen);
   assert(IsBidiStream(chunk->mStreamID) || IsPeerStream(chunk->mStreamID)); // we should not send stopsending on a local uni stream.
 
@@ -1422,7 +1383,6 @@ StreamState::CreateMaxDataFrame(unsigned char *&framePtr, const unsigned char *e
   assert(chunk->mType == ReliableData::kMaxData);
   assert(chunk->mConnectionCredit);
   assert(!chunk->mLen);
-  assert(!chunk->mStreamID);
 
   uint32_t used;
   framePtr[0] = FRAME_TYPE_MAX_DATA;
@@ -1524,20 +1484,24 @@ StreamState::CreateStreamIDBlockedFrame(unsigned char *&framePtr, const unsigned
 StreamState::StreamState(MozQuic *q, uint64_t initialStreamWindow,
                          uint64_t initialConnectionWindow)
   : mMozQuic(q)
-  , mPeerMaxStreamData(kMaxStreamDataDefault)
-  , mLocalMaxStreamData(initialStreamWindow)
+  , mPeerMaxStreamDataBidiLocal(kMaxStreamDataDefault)
+  , mPeerMaxStreamDataBidiRemote(kMaxStreamDataDefault)
+  , mPeerMaxStreamDataUni(kMaxStreamDataDefault)
+  , mLocalMaxStreamDataBidiLocal(initialStreamWindow)
+  , mLocalMaxStreamDataBidiRemote(initialStreamWindow)
+  , mLocalMaxStreamDataUni(initialStreamWindow)
   , mPeerMaxData(kMaxDataDefault)
   , mMaxDataSent(0)
   , mMaxDataBlocked(false)
   , mLocalMaxData(initialConnectionWindow)
   , mLocalMaxDataUsed(0)
 {
-  mNextStreamID[0] = 1;
-  mNextStreamID[1] = 1;
+  mNextStreamID[0] = 0;
+  mNextStreamID[1] = 0;
   mMaxStreamIDBlocked[0] = false;
   mMaxStreamIDBlocked[1] = false;
-  mNextRecvStreamIDUsed[0] = 1;
-  mNextRecvStreamIDUsed[1] = 1;
+  mNextRecvStreamIDUsed[0] = 0;
+  mNextRecvStreamIDUsed[1] = 0;
   mPeerMaxStreamID[0] = 0;
   mPeerMaxStreamID[1] = 0;
   mLocalMaxStreamID[0] = 0;
@@ -1685,25 +1649,6 @@ StreamIn::~StreamIn()
 {
 }
 
-uint32_t
-StreamPair::ResetInbound()
-{
-  // this is used in a very peculiar circumstance after HRR on stream 0 only
-  assert(mStreamID == 0);
-  return mIn->ResetInbound();
-}
-
-uint32_t
-StreamIn::ResetInbound()
-{
-  mOffset = 0;
-  mFinalOffset = 0;
-  mFinRecvd = false;
-  mRstRecvd = false;
-  mEndGivenToApp = false;
-  return MOZQUIC_OK;
-}
-
 // returning amt = 0 is not a fin or an error on its own
 uint32_t
 StreamIn::Read(unsigned char *buffer, uint32_t avail, uint32_t &amt, bool &fin)
@@ -1754,14 +1699,10 @@ StreamIn::MaybeIssueFlowControlCredit()
 {
   
   uint64_t available = mLocalMaxStreamData - mNextStreamDataExpected;
-  uint32_t increment = mFlowController->GetIncrement();
+  uint32_t increment = mFlowController->GetIncrement(mStreamID);
 
-  if (mNextStreamDataExpected > mLocalMaxStreamData) {
-    assert(!mStreamID);
-    available = 0;
-    increment = mNextStreamDataExpected - mLocalMaxStreamData + 1000000;
-  }
-        
+  assert(mNextStreamDataExpected <= mLocalMaxStreamData);
+
   StreamLog7("peer has %ld stream flow control credits available on stream %d\n",
              available, mStreamID);
   if (mFinRecvd || mRstRecvd) {
@@ -1823,14 +1764,12 @@ StreamIn::Supply(std::unique_ptr<ReliableData> &d)
   }
 
   if (endData > mNextStreamDataExpected) {
-    if (mStreamID) {
-      mFlowController->ConnectionReadBytes(endData - mNextStreamDataExpected);
-    }
+    mFlowController->ConnectionReadBytes(endData - mNextStreamDataExpected);
 
     mNextStreamDataExpected = endData;
     // todo - credit scheme should be based on how much is queued here.
     // todo - autotuning
-    if (mStreamID && (mNextStreamDataExpected > mLocalMaxStreamData)) {
+    if (mNextStreamDataExpected > mLocalMaxStreamData) {
       mMozQuic->Shutdown(FLOW_CONTROL_ERROR, FRAME_TYPE_STREAM, "stream flow control error");
       StreamLog1("stream flow control recvd too much data\n");
       return MOZQUIC_ERR_IO;
@@ -2074,6 +2013,273 @@ ReliableData::ReliableData(ReliableData &orig)
 
 ReliableData::~ReliableData()
 {
+}
+
+CryptoStream::CryptoStream(StreamState *aStreamState)
+  : mStreamState(aStreamState)
+{
+  mOutputOffset[0] = 0;
+  mOutputOffset[1] = 0;
+  mOutputOffset[2] = 0;
+  mInputOffset[0] = 0;
+  mInputOffset[1] = 0;
+  mInputOffset[2] = 0;
+}
+
+void
+CryptoStream::Reset()
+{
+  mOutputOffset[0] = 0;
+  mOutputOffset[1] = 0;
+  mOutputOffset[2] = 0;
+}
+
+// returning amt = 0 is not an error on its own
+uint32_t
+CryptoStream::Read(packetNumberSpace pnSpace, unsigned char *buffer, uint32_t avail, uint32_t &amt)
+{
+  amt = 0;
+
+  if (Empty(pnSpace)) {
+    return MOZQUIC_OK;
+  }
+
+  auto i = mAvailable[pnSpace].begin();
+  if ((*i)->mOffset > mInputOffset[pnSpace]) {
+    return MOZQUIC_ERR_IO;
+  }
+
+  uint64_t skip = mInputOffset[pnSpace] - (*i)->mOffset;
+  const unsigned char *src = (*i)->mData.get() + skip;
+  assert((*i)->mLen > skip);
+  uint64_t copyLen = (*i)->mLen - skip;
+  if (copyLen > avail) {
+    copyLen = avail;
+  }
+  memcpy (buffer, src, copyLen);
+  amt = copyLen;
+  mInputOffset[pnSpace] += copyLen;
+
+  assert(mInputOffset[pnSpace] <= (*i)->mOffset + (*i)->mLen);
+  if (mInputOffset[pnSpace] == (*i)->mOffset + (*i)->mLen) {
+    // we dont need this buffer anymore
+    mAvailable[pnSpace].erase(i);
+  }
+  return MOZQUIC_OK;
+}
+
+uint32_t
+CryptoStream::HandleCryptoFrame(FrameHeaderData *result,
+                                const unsigned char *pkt, const unsigned char *endpkt,
+                                uint32_t &_ptr, keyPhase kp)
+{
+  CryptoLog5("recv crypto frame len=%lu offset=%lu keyPhase=%d\n",
+             result->u.mCrypto.mDataLen,
+             result->u.mCrypto.mOffset,
+             kp);
+
+  // parser checked for this, but jic
+  assert(pkt + _ptr + result->u.mCrypto.mDataLen <= endpkt);
+  std::unique_ptr<ReliableData>
+    tmp(new ReliableData(0,
+                         result->u.mCrypto.mOffset,
+                         pkt + _ptr,
+                         result->u.mCrypto.mDataLen,
+                         false));
+
+  packetNumberSpace pnSpace = MozQuic::KeyPhaseToPacketNumberSpace(kp);
+  Supply(tmp, pnSpace);
+
+  while (!Empty(pnSpace)) {
+    assert((pnSpace == PN_SPACE_INITIAL) || mAvailable[PN_SPACE_INITIAL].empty()); // When we switch to handshake phase, there should not be any initial packets queued.
+    auto i = mAvailable[pnSpace].begin();
+    uint64_t skip = mInputOffset[pnSpace] - (*i)->mOffset;
+    const unsigned char *src = (*i)->mData.get() + skip;
+    assert((*i)->mLen > skip);
+    uint64_t len = (*i)->mLen - skip;
+    mStreamState->mMozQuic->RecordLayerData((pnSpace == PN_SPACE_INITIAL) ? 0 : ((pnSpace == PN_SPACE_HANDSHAKE) ? 2 : 3), src, len);
+    mInputOffset[pnSpace] += len;
+    assert(mInputOffset[pnSpace] == (*i)->mOffset + (*i)->mLen);
+    mAvailable[pnSpace].erase(i);
+    if (mAvailable[pnSpace].empty() && (mStreamState->mMozQuic->CurrentKeyPhase() > kp)) {
+      pnSpace = MozQuic::KeyPhaseToPacketNumberSpace(mStreamState->mMozQuic->CurrentKeyPhase());
+    }
+  }
+
+  _ptr += result->u.mCrypto.mDataLen;
+  return MOZQUIC_OK;
+}
+
+uint32_t
+CryptoStream::Supply(std::unique_ptr<ReliableData> &d, packetNumberSpace pnSpace)
+{
+  // new frame segment goes into a linked list ordered by seqno
+  // any overlapping data is dropped
+
+  if (!d->mLen) {
+    // we don't need empty chunks
+    return MOZQUIC_OK;
+  }
+
+  uint64_t endData = d->mOffset + d->mLen;
+  if (endData <= mInputOffset[pnSpace]) {
+    // this is 100% old data. we can drop it
+    d.reset();
+    return MOZQUIC_OK;
+  }
+
+  // if the list is empty, add it to the list!
+  if (mAvailable[pnSpace].empty()) {
+    mAvailable[pnSpace].push_front(std::move(d));
+    return MOZQUIC_OK;
+  }
+
+  // note these are reverse iterators so iter++ moves to the left (earlier seqno)
+  // and insert puts new node to the right (later seqno)
+  auto i = mAvailable[pnSpace].rbegin();
+  auto end = mAvailable[pnSpace].rend();
+
+  while (i != end) {
+    // check for dup
+    // if i offset && len == d offset && len drop it
+    if ((d->mOffset == (*i)->mOffset) && (d->mLen == (*i)->mLen)) {
+      // todo log
+      // this is a dup. ignore it.
+      std::unique_ptr<ReliableData> x(std::move(d));
+      return MOZQUIC_OK;
+    }
+
+    // check for full append to the right (later seq [d is after i])
+    // if i offset + len <= d.offset then append after
+    if (((*i)->mOffset + (*i)->mLen) <= d->mOffset) {
+      mAvailable[pnSpace].insert(i.base(), std::move(d));
+      return MOZQUIC_OK;
+    }
+
+    // check for full location to the left (earlier seq [d is before i])
+    // if d offset + len <= i.offset then iter left and rpt
+    if ((d->mOffset + d->mLen) <= (*i)->mOffset){
+      i++;
+      continue;
+    }
+
+    // d overlaps with i. Form a new chunk with any portion that
+    // exists to the right and append that (if it exists), and then
+    // adjust the current chunk to only cover data to the left (not
+    // any overlap) and iter to the left.
+    if ((d->mOffset + d->mLen) > ((*i)->mOffset + (*i)->mLen)) {
+      // we need a new chunk
+      uint64_t skip = (*i)->mOffset + (*i)->mLen - d->mOffset;
+      std::unique_ptr<ReliableData>
+        newChunk(new ReliableData(d->mStreamID,
+                                  (*i)->mOffset + (*i)->mLen,
+                                  d->mData.get() + skip,
+                                  d->mLen - skip, false));
+      d->mLen = skip;
+
+      // todo log
+      // append it to the right
+      mAvailable[pnSpace].insert(i.base(), std::move(newChunk));
+      // dont continue or return, still need to deal with remainder
+    }
+
+    if ((*i)->mOffset <= d->mOffset) {
+      // there is no more data to the left. drop it.
+      // todo log
+      std::unique_ptr<ReliableData> x(std::move(d));
+      return MOZQUIC_OK;
+    }
+
+    // adjust data to be non overlapping
+    d->mLen = (*i)->mOffset - d->mOffset;
+    // todo log
+    i++;
+  }
+
+  mAvailable[pnSpace].push_front(std::move(d));
+  return MOZQUIC_OK;
+}
+
+bool
+CryptoStream::Empty(packetNumberSpace pnSpace)
+{
+  if (mAvailable[pnSpace].empty()) {
+    return true;
+  }
+
+  auto i = mAvailable[pnSpace].begin();
+  if ((*i)->mOffset > mInputOffset[pnSpace]) {
+    return true;
+  }
+
+  return false;
+}
+
+uint32_t
+CryptoStream::Write(const unsigned char *data, uint32_t len, keyPhase kp)
+{
+  CryptoLog5("New tls data: length %d, key phase %d.\n", len, kp);
+  packetNumberSpace pnSpace = MozQuic::KeyPhaseToPacketNumberSpace(kp);
+  std::unique_ptr<ReliableData> tmp(new ReliableData(0, mOutputOffset[pnSpace], data, len, false));
+  tmp->MakeCrypto();
+  tmp->mTransmitKeyPhase = kp;
+  mOutputOffset[pnSpace] += len;
+
+  mStreamState->mConnUnWritten[pnSpace].push_back(std::move(tmp));
+  return MOZQUIC_OK;
+}
+
+uint32_t
+StreamState::CreateCryptoFrame(packetNumberSpace pnSpace,
+                               unsigned char *&framePtr, const unsigned char *endpkt,
+                               std::list<std::unique_ptr<ReliableData>>::iterator &chunkIter)
+{
+  uint32_t used = 0;
+  framePtr[0] = FRAME_TYPE_CRYPTO;
+  framePtr++;
+
+  if (MozQuic::EncodeVarint((*chunkIter)->mOffset, framePtr, (endpkt - framePtr), used) != MOZQUIC_OK) {
+    return MOZQUIC_ERR_GENERAL;
+  }
+  framePtr += used;
+
+  // calc assumes 2 byte length encoding
+  uint32_t room = (endpkt - framePtr) - 2;
+
+  if (room < ((*chunkIter)->mLen)) {
+    // we need to split this chunk. its too big
+    // todo iterate on them all instead of doing this n^2
+    // as there is a copy involved
+    std::unique_ptr<ReliableData>
+      tmp(new ReliableData(0,
+                           (*chunkIter)->mOffset + room,
+                           (*chunkIter)->mData.get() + room,
+                           (*chunkIter)->mLen - room,
+                           false));
+    (*chunkIter)->mLen = room;
+    tmp->mType = ReliableData::kCrypto;
+    tmp->mFromRTO = (*chunkIter)->mFromRTO;
+    tmp->mTransmitKeyPhase = (*chunkIter)->mTransmitKeyPhase;
+    auto iterReg = chunkIter++;
+    mConnUnWritten[pnSpace].insert(chunkIter, std::move(tmp));
+    chunkIter = iterReg;
+  }
+  assert(room >= (*chunkIter)->mLen);
+  assert((*chunkIter)->mLen <= (1 << 14)); // check 2 byte assumption
+
+  if (MozQuic::EncodeVarint((*chunkIter)->mLen, framePtr, (endpkt - framePtr), used) != MOZQUIC_OK) {
+    return MOZQUIC_ERR_GENERAL;
+  }
+  assert(used <= 2);
+  framePtr += used;
+
+  memcpy(framePtr, (*chunkIter)->mData.get(), (*chunkIter)->mLen);
+  StreamLog5("writing a crypto frame %d @ offset %d in packet [%lX %d]\n",
+             (*chunkIter)->mLen, (*chunkIter)->mOffset,
+             mMozQuic->mNextTransmitPacketNumber[pnSpace], pnSpace);
+  framePtr += (*chunkIter)->mLen;
+
+  return MOZQUIC_OK;
 }
 
 } // namespace

@@ -25,8 +25,8 @@ MozQuic::CreateShortPacketHeader(unsigned char *pkt, uint32_t pktSize,
   // if (nextNumber - lowestUnacked) > 8000 then use 4.
   size_t pnSize = 2;
   uint32_t needed = 3 + mPeerCID.Len();
-  if (!mStreamState->mUnAckedPackets.empty() &&
-      ((mNextTransmitPacketNumber - mStreamState->mUnAckedPackets.front()->mPacketNumber) > 8000)) {
+  if (!mStreamState->mUnAckedPackets[PN_SPACE_01RTT].empty() &&
+      ((mNextTransmitPacketNumber[PN_SPACE_01RTT] - mStreamState->mUnAckedPackets[PN_SPACE_01RTT].front()->mPacketNumber) > 8000)) {
     pnSize = 4;
     needed += 2;
   }
@@ -44,13 +44,13 @@ MozQuic::CreateShortPacketHeader(unsigned char *pkt, uint32_t pktSize,
   *pnPtrOut = pkt + used;
 
   if (pnSize == 2) { // 2 bytes
-    uint16_t tmp16 = htons(mNextTransmitPacketNumber & 0x3fff);
+    uint16_t tmp16 = htons(mNextTransmitPacketNumber[PN_SPACE_01RTT] & 0x3fff);
     memcpy(pkt + used, &tmp16, 2);
     pkt[used] |= 0x80; // 2 byte marker
     used += 2;
   } else {
     assert(pnSize == 4);
-    uint32_t tmp32 = htonl(mNextTransmitPacketNumber & 0x3fffffff);
+    uint32_t tmp32 = htonl(mNextTransmitPacketNumber[PN_SPACE_01RTT] & 0x3fffffff);
     memcpy(pkt + used, &tmp32, 4);
     pkt[used] |= 0xC0; // 4 byte marker
     used += 4;
@@ -193,27 +193,51 @@ MozQuic::EncodeVarint(uint64_t input, unsigned char *dest, uint32_t avail, uint3
 }
 
 uint32_t
-MozQuic::Create0RTTLongPacketHeader(unsigned char *pkt, uint32_t pktSize,
-                                    uint32_t &used, unsigned char **payloadLenPtr,
-                                    unsigned char **pnPtr)
+MozQuic::CreateLongPacketHeader(LongHeaderType type, packetNumberSpace pnSpace,
+                                unsigned char *pkt, uint32_t pktSize,
+                                uint32_t &used, unsigned char **payloadLenPtr,
+                                unsigned char **pnPtr, size_t &pnLen)
 {
   unsigned char *framePtr = pkt;
   if (pktSize < 5) {
     return MOZQUIC_ERR_GENERAL;
   }
-  framePtr[0] = 0x80 | PACKET_TYPE_0RTT_PROTECTED;
+  framePtr[0] = 0x80 | type;
   framePtr++;
 
   uint32_t tmp32 = htonl(mVersion);
   memcpy(framePtr, &tmp32, 4);
   framePtr += 4;
 
-  uint32_t rv = CID::FormatLongHeader(mPeerCID, mLocalCID, mLocalOmitCID, framePtr,
-                                      (pkt + pktSize) - framePtr, used);
+  uint32_t rv;
+  if (type == PACKET_TYPE_0RTT_PROTECTED) {
+    rv = CID::FormatLongHeader(mInitialDestCIDForKeys, mLocalCID, mLocalOmitCID, framePtr,
+                               (pkt + pktSize) - framePtr, used);
+  } else {
+    rv = CID::FormatLongHeader(mPeerCID, mLocalCID, mLocalOmitCID, framePtr,
+                               (pkt + pktSize) - framePtr, used);
+  }
   if (rv != MOZQUIC_OK) {
     return rv;
   }
   framePtr += used;
+
+  if (type == PACKET_TYPE_INITIAL) {
+    // Enocode token.
+    if (EncodeVarint(mTokenLen, framePtr, (pkt + pktSize) - framePtr, used) != MOZQUIC_OK) {
+      return MOZQUIC_ERR_GENERAL;
+    }
+
+    framePtr += used;
+
+    if (mTokenLen) {
+      if (mTokenLen > ((pkt + pktSize) - framePtr)) {
+        return MOZQUIC_ERR_GENERAL;
+      }
+      memcpy(framePtr, mToken.get(), mTokenLen);
+      framePtr += mTokenLen;
+    }
+  }
 
   if (((pkt + pktSize) - framePtr) < 6) {
     return MOZQUIC_ERR_GENERAL;
@@ -228,9 +252,8 @@ MozQuic::Create0RTTLongPacketHeader(unsigned char *pkt, uint32_t pktSize,
   (*payloadLenPtr)[1] = 0x00;  
   framePtr += 2;
 
-  size_t pnLen;
   *pnPtr = framePtr;
-  EncodePN(mNextTransmitPacketNumber, framePtr, pnLen);
+  EncodePN(mNextTransmitPacketNumber[pnSpace], framePtr, pnLen);
   framePtr += pnLen;
 
   used = framePtr - pkt;
@@ -238,7 +261,7 @@ MozQuic::Create0RTTLongPacketHeader(unsigned char *pkt, uint32_t pktSize,
 }
 
 FrameHeaderData::FrameHeaderData(const unsigned char *pkt, uint32_t pktSize,
-                                 MozQuic *session, bool fromCleartext)
+                                 MozQuic *session)
 {
   uint32_t used;
   uint16_t tmp16;
@@ -299,9 +322,7 @@ FrameHeaderData::FrameHeaderData(const unsigned char *pkt, uint32_t pktSize,
     }
 
     if ((framePtr - pkt) + u.mStream.mDataLen > pktSize) {
-      if (!fromCleartext) {
-        session->Shutdown(FRAME_ENCODING_ERROR, FRAME_TYPE_STREAM, "stream frame header short");
-      }
+      session->Shutdown(FRAME_ENCODING_ERROR, FRAME_TYPE_STREAM, "stream frame header short");
       session->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "stream frame data short");
       return;
     }
@@ -456,11 +477,6 @@ FrameHeaderData::FrameHeaderData(const unsigned char *pkt, uint32_t pktSize,
       return;
 
     case FRAME_TYPE_PATH_CHALLENGE:
-      if (fromCleartext) {
-        session->Shutdown(FRAME_ENCODING_ERROR, FRAME_TYPE_PATH_CHALLENGE, "Frame Type not allowed");
-        return;
-      }
-
       if (pktSize < FRAME_TYPE_PATH_CHALLENGE_LENGTH) {
         session->RaiseError(MOZQUIC_ERR_GENERAL,
                             (char *) "challenge length expected");
@@ -474,11 +490,6 @@ FrameHeaderData::FrameHeaderData(const unsigned char *pkt, uint32_t pktSize,
       break;
 
     case FRAME_TYPE_PATH_RESPONSE:
-      if (fromCleartext) {
-        session->Shutdown(FRAME_ENCODING_ERROR, FRAME_TYPE_PATH_RESPONSE, "Frame Type not allowed");
-        return;
-      }
-
       if (pktSize < FRAME_TYPE_PATH_RESPONSE_LENGTH) {
         session->RaiseError(MOZQUIC_ERR_GENERAL,
                             (char *) "response length expected");
@@ -636,6 +647,30 @@ FrameHeaderData::FrameHeaderData(const unsigned char *pkt, uint32_t pktSize,
       mFrameLen = framePtr - pkt;
       return;
 
+    case FRAME_TYPE_CRYPTO:
+      mType = FRAME_TYPE_CRYPTO;
+      if (MozQuic::DecodeVarint(framePtr, endOfPkt - framePtr, u.mCrypto.mOffset, used) != MOZQUIC_OK) {
+        session->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "parse err");
+        return;
+      }
+      framePtr += used;
+
+      if (MozQuic::DecodeVarintMax32(framePtr, endOfPkt - framePtr, u.mCrypto.mDataLen, used) != MOZQUIC_OK) {
+        session->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "parse err");
+        return;
+      }
+      framePtr += used;
+
+      if ((framePtr - pkt) + u.mCrypto.mDataLen > pktSize) {
+        session->Shutdown(FRAME_ENCODING_ERROR, FRAME_TYPE_STREAM, "stream frame header short");
+        session->RaiseError(MOZQUIC_ERR_GENERAL, (char *) "stream frame data short");
+        return;
+      }
+
+      mValid = MOZQUIC_OK;
+      mFrameLen = framePtr - pkt;
+      return;
+
     default:
       return;
     }
@@ -643,12 +678,17 @@ FrameHeaderData::FrameHeaderData(const unsigned char *pkt, uint32_t pktSize,
   mValid = MOZQUIC_OK;
 }
 
-LongHeaderData::LongHeaderData(MozQuic *mq, unsigned char *pkt, uint32_t pktSize, uint64_t nextPN)
+LongHeaderData::LongHeaderData(unsigned char *pkt, uint32_t pktSize)
+  : mLen(0)
+  , mInvariantSize(0)
+  , mPayloadLen(0)
+  , mPacketNumber(0)
+  , mVersion(0)
+  , mHeaderSize(0)
+  , mTokenLen(0)
 {
   assert(pkt[0] & 0x80);
   mType = PACKET_TYPE_ERR; // signal parse error
-  mVersion = 0;
-  mHeaderSize = 0;
 
   // these fields are all version independent - though the interpretation
   // of type is not.
@@ -669,45 +709,129 @@ LongHeaderData::LongHeaderData(MozQuic *mq, unsigned char *pkt, uint32_t pktSize
     mSourceCID.Parse(scil, pkt + offset);
     offset += mSourceCID.Len();
 
-    if (mVersion) {
-      uint32_t used;
+    uint8_t type = pkt[0] & ~0x80;
+    if ((type == PACKET_TYPE_INITIAL) ||
+        (type == PACKET_TYPE_RETRY) ||
+        (type == PACKET_TYPE_HANDSHAKE) ||
+        (type == PACKET_TYPE_0RTT_PROTECTED)) {
+      mType = static_cast<enum LongHeaderType>(pkt[0] & ~0x80);
+    }
+    mInvariantSize = offset;
+  } while(0);
+}
 
-      // payload + pnLen Length
-      uint32_t length = 0;
-      if (MozQuic::DecodeVarintMax32(pkt + offset,
-                                     pktSize - offset, length, used) != MOZQUIC_OK) {
-        break;
-      }
-      offset += used;
+// This decodes all fields up to the packet number field. It also determins the total
+// length of the packet.
+uint32_t
+LongHeaderData::DecodeVersionSpecificHeaderFields(unsigned char *pkt, uint32_t pktSize)
+{
+  assert(mInvariantSize); // we must have decoded the invariant part.
+  assert(mVersion); // the version field must be set.
+  assert(pktSize >= mInvariantSize);
+  mHeaderSize = mInvariantSize;
 
-      // Packet Number
-      size_t pnLen;
-      enum LongHeaderType pktType = static_cast<enum LongHeaderType>(pkt[0] & ~0x80);
-      if (mq) {
-        mPacketNumber = ShortHeaderData::DecodePacketNumber(mq,
-                                                            pktType == PACKET_TYPE_0RTT_PROTECTED ? kDecrypt0RTT : kDecryptHandshake,
-                                                            pkt + offset, nextPN,
-                                                            length - offset, pnLen);// A single UDP packet can
-                                                                                    // contain multiple long header packets.
-                                                                                    // therefore we use length instead of pktSize.
-      } else if (pktType == PACKET_TYPE_INITIAL) {
-        mPacketNumber = DecodePacketNumber(pkt + offset, nextPN,
-                                           length - offset, pnLen); // A single UDP packet can
-                                                                    // contain multiple long header packets.
-                                                                    // therefore we use length instead of pktSize.
-      } else {
-        mPacketNumber = 0;
-        pnLen = 1;
-      }
-      offset += pnLen;
-      mPayloadLen = length - pnLen; // For the long header, length field includes packet number field as well
+  if (mType == PACKET_TYPE_RETRY) {
+    // Get Original Destination Connection ID
+    if (pktSize < (mHeaderSize + 1)) {
+      return MOZQUIC_ERR_GENERAL;
+    }
+    uint8_t odcil = (pkt[mHeaderSize] & 0x0f);
+    mHeaderSize++;
+    if (pktSize < (mHeaderSize + odcil + (odcil ? 3 : 0))) {
+      return MOZQUIC_ERR_GENERAL;
     }
 
-    mHeaderSize = offset;
+    mOrigDestCID.Parse(odcil, pkt + mHeaderSize);
+    mHeaderSize += mOrigDestCID.Len();
+    mTokenLen = pktSize - mHeaderSize;
+    if (mTokenLen) {
+      mToken.reset(new unsigned char[mTokenLen]);
+      memcpy(mToken.get(), pkt + mHeaderSize, mTokenLen);
+      mHeaderSize += mTokenLen;
+    }
+    mLen = mHeaderSize;
+    return MOZQUIC_OK;
+  }
 
-    // Assigning the type makes it OK
-    mType = static_cast<enum LongHeaderType>(pkt[0] & ~0x80);
-  } while (0);
+  uint32_t used;
+  if (mType == PACKET_TYPE_INITIAL) {
+    // initial packet may have a token.
+    if (MozQuic::DecodeVarintMax32(pkt + mHeaderSize,
+                                   pktSize - mHeaderSize, mTokenLen, used) != MOZQUIC_OK) {
+      return MOZQUIC_ERR_GENERAL;
+    }
+    mHeaderSize += used;
+    if (mTokenLen) {
+      if (pktSize < mHeaderSize + mTokenLen) {
+        return MOZQUIC_ERR_GENERAL;
+      }
+      mToken.reset(new unsigned char[mTokenLen]);
+      memcpy(mToken.get(), pkt + mHeaderSize, mTokenLen);
+      mHeaderSize += mTokenLen;
+    }
+  }
+
+  // payload + pnLen Length
+  if (MozQuic::DecodeVarintMax32(pkt + mHeaderSize, pktSize - mHeaderSize, mLen, used) != MOZQUIC_OK) {
+    return MOZQUIC_ERR_GENERAL;
+  }
+  mHeaderSize += used;
+  mLen += mHeaderSize;
+
+  return MOZQUIC_OK;
+}
+
+uint32_t
+LongHeaderData::DecodePacketNumber(unsigned char *pkt, uint32_t pktSize, MozQuic *mozQuic, uint64_t next)
+{
+  assert(mInvariantSize);
+  assert(mVersion);
+  assert(mLen);
+  assert(mHeaderSize);
+
+  assert(pktSize >= mLen);
+
+  size_t pnLen = 0;
+
+  if (mozQuic) {
+    operationType ot;
+    switch (mType) {
+    case PACKET_TYPE_INITIAL:
+      ot = kDecryptInitial;
+      break;
+    case PACKET_TYPE_HANDSHAKE:
+      ot = kDecryptHandshake;
+      break;
+    case PACKET_TYPE_0RTT_PROTECTED:
+      ot = kDecrypt0RTT;
+      break;
+    default:
+      assert(false);
+    }
+    mPacketNumber = ShortHeaderData::DecodePacketNumber(mozQuic,
+                                                        ot,
+                                                        pkt + mHeaderSize, next,
+                                                        mLen - mHeaderSize, pnLen);
+  } else {
+    assert(mType == PACKET_TYPE_INITIAL);
+    if (mLen < 4) {
+      return MOZQUIC_ERR_GENERAL;
+    }
+
+    NSSHelper::staticDecryptPNInPlace(pkt + mHeaderSize,
+                                      mDestCID,
+                                      pkt + mHeaderSize + 4, mLen - 4);
+    mPacketNumber = ShortHeaderData::DecodePlaintextPacketNumber(pkt + mHeaderSize, next,
+                                                                 mLen, pnLen);
+    if (!pnLen) { // This me there has been an error.
+      return MOZQUIC_ERR_GENERAL;
+    }
+
+  }
+  mHeaderSize += pnLen;
+  mPayloadLen = mLen - mHeaderSize; // For the long header, length field includes packet number field as well
+
+  return MOZQUIC_OK;
 }
 
 void
@@ -727,21 +851,6 @@ MozQuic::DecryptPNInPlace(enum operationType mode, unsigned char *pn,
     return;
   }
   return mNSSHelper->DecryptPNInPlace(mode, pn, cipherTextToSample, cipherLen);
-}
-
-uint64_t
-LongHeaderData::DecodePacketNumber(unsigned char *pkt, uint64_t next, uint32_t pktSize,
-                                   size_t &outPNSize)
-{
-  outPNSize = 0;
-  if (pktSize < 4) {
-    return 0;
-  }
-
-  NSSHelper::staticDecryptPNInPlace(pkt,
-                                    mDestCID,
-                                    pkt + 4, pktSize - 4);
-  return ShortHeaderData::DecodePlaintextPacketNumber(pkt, next, pktSize, outPNSize);
 }
 
 uint64_t
@@ -807,7 +916,7 @@ static const uint32_t localCIDSize = 10; // 4 ought to be plenty. but stress tes
 ShortHeaderData::ShortHeaderData(MozQuic *mq,
                                  unsigned char *pkt, uint32_t pktSize,
                                  uint64_t nextPN, bool allowOmitCID,
-                                 CID &defaultCID)
+                                 CID &defaultCID, bool decodePN)
 {
   // note that StatlessReset.cpp also hand rolls a special short packet header
 
@@ -833,7 +942,7 @@ ShortHeaderData::ShortHeaderData(MozQuic *mq,
     used += mDestCID.Len();
   }
 
-  if (!nextPN) {
+  if (!decodePN) {
     mPacketNumber = 0;
   } else {
     size_t pnSize;

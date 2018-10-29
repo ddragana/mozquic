@@ -22,6 +22,8 @@ private:
                                 uint32_t object);
   static void Encode16ByteObject(unsigned char *output, uint16_t &_offset, uint16_t maxOutput,
                                 unsigned char *object);
+  static void EncodeXByteObject(unsigned char *output, uint16_t &_offset, uint16_t maxOutput,
+                                uint16_t len, const unsigned char *object);
   static void Encode2xLenx1Record(unsigned char *output, uint16_t &_offset, uint16_t maxOutput,
                                   uint16_t object1, uint8_t object2);
   static void Encode2xLenx2Record(unsigned char *output, uint16_t &_offset, uint16_t maxOutput,
@@ -40,10 +42,15 @@ private:
   static void Decode16ByteObject(const unsigned char *input,
                                  uint16_t &_offset, uint16_t inputSize,
                                  unsigned char *_output);
+  static void DecodeXByteObject(const unsigned char *input,
+                                uint16_t &_offset, uint16_t inputSize,
+                                uint16_t len, unsigned char *_output);
 public:
   static void EncodeClientTransportParameters(unsigned char *output, uint16_t &_offset, uint16_t maxOutput,
                                               uint32_t initialVersion,
-                                              uint32_t initialMaxStreamData,
+                                              uint32_t initialMaxStreamDataBidiLocal,
+                                              uint32_t initialMaxStreamDataBidiRemote,
+                                              uint32_t initialMaxStreamDataUni,
                                               uint32_t initialMaxDataBytes,
                                               uint32_t initialMaxStreamBidiID,
                                               uint32_t initialMaxStreamUniID,
@@ -52,7 +59,9 @@ public:
                                               uint8_t ackDelayExponent);
   static uint32_t DecodeClientTransportParameters(unsigned char *input, uint16_t inputSize,
                                                   uint32_t &_initialVersion,
-                                                  uint32_t &_initialMaxStreamData,
+                                                  uint32_t &_initialMaxStreamDataBidiLocal,
+                                                  uint32_t &_initialMaxStreamDataBidiRemote,
+                                                  uint32_t &_initialMaxStreamDataUni,
                                                   uint32_t &_initialMaxDataBytes,
                                                   uint32_t &_initialMaxStreamBidiID,
                                                   uint32_t &_initialMaxStreamUniID,
@@ -64,18 +73,24 @@ public:
   static void EncodeServerTransportParameters(unsigned char *output, uint16_t &_offset, uint16_t maxOutput,
                                               uint32_t negotiatedVersion,
                                               const uint32_t *versionList, uint16_t versionListSize,
-                                              uint32_t initialMaxStreamData,
+                                              uint32_t initialMaxStreamDataBidiLocal,
+                                              uint32_t initialMaxStreamDataBidiRemote,
+                                              uint32_t initialMaxStreamDataUni,
                                               uint32_t initialMaxDataBytes,
                                               uint32_t initialMaxStreamBidiID,
                                               uint32_t initialMaxStreamIUni,
                                               uint16_t idleTimeout,
                                               uint16_t maxPacket,
                                               uint8_t ackDelayExponent,
-                                              unsigned char *statelessResetToken /* 16 bytes */);
+                                              unsigned char *statelessResetToken, /* 16 bytes */
+                                              uint16_t originalConnectionIdLen,
+                                              const unsigned char *originalConnectionId);
   static uint32_t DecodeServerTransportParameters(unsigned char *input, uint16_t inputSize,
                                                   uint32_t &_negotiatedVersion,
                                                   uint32_t *versionList, uint16_t &_versionListSize,
-                                                  uint32_t &_initialMaxStreamData,
+                                                  uint32_t &_initialMaxStreamDataBidiLocal,
+                                                  uint32_t &_initialMaxStreamDataBidiRemote,
+                                                  uint32_t &_initialMaxStreamDataUni,
                                                   uint32_t &_initialMaxDataBytes,
                                                   uint32_t &_initialMaxStreamBidiID,
                                                   uint32_t &_initialMaxStreamUniID,
@@ -84,7 +99,9 @@ public:
                                                   uint8_t  &_ackDelayExponent,
                                                   unsigned char *_statelessResetToken /* 16 bytes */,
                                                   bool     &_validStatelessResetToken,
-                                                  MozQuic *forLogging);
+                                                  uint16_t &_originalConnectionIdLen,
+                                                  unsigned char *_originalConnectionId,
+                                                  MozQuic  *forLogging);
 
 private:
   TransportExtension(){}

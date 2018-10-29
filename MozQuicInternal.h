@@ -33,44 +33,48 @@ namespace mozquic {
 //
 // sync with versionOK() and GenerateVersionNegotiation()
 static const uint32_t kMozQuicVersion1 = 0xf123f0c5; // 0xf123f0c* reserved for mozquic
-static const uint32_t kMozQuicIetfID12 = 0xff00000c;
+static const uint32_t kMozQuicIetfID15 = 0xff00000f;
 static const uint32_t kMozQuicVersionGreaseS = 0xea0a6a2a;
 static const uint32_t VersionNegotiationList[] = {
-  kMozQuicVersionGreaseS, kMozQuicIetfID12, kMozQuicVersion1,
+  kMozQuicVersionGreaseS, kMozQuicIetfID15, kMozQuicVersion1,
 };
+
+static const int32_t kMaxAckDelayDefault = 25;
 
 enum connectionState
 {
   STATE_UNINITIALIZED,
-  CLIENT_STATE_0RTT,
-  CLIENT_STATE_1RTT,
+  CLIENT_STATE_INITIAL,
+  CLIENT_STATE_HANDSHAKE,
+  CLIENT_STATE_HAS_1RTT_KEYS, // We have 1rtt keys but HandshakeCallback is still not called.
   CLIENT_STATE_CONNECTED,
   CLIENT_STATE_CLOSED,  // todo more shutdown states
 
   SERVER_STATE_BREAK,
 
   SERVER_STATE_LISTEN,
-  SERVER_STATE_0RTT,
-  SERVER_STATE_1RTT,
-  SERVER_STATE_SSR,
+  SERVER_STATE_INITIAL,
+  SERVER_STATE_HANDSHAKE,
+  SERVER_STATE_RETRY,
+  SERVER_STATE_HAS_1RTT_KEYS, // We have 1rtt keys but HandshakeCallbach is still not called.
   SERVER_STATE_CONNECTED,
   SERVER_STATE_CLOSED,
 };
 
 enum transportErrorType {
-  ERROR_NO_ERROR            = 0x0000,
-  ERROR_INTERNAL            = 0x0001,
-  SERVER_BUSY_ERROR         = 0x0002,
+  NO_ERROR                  = 0x0000,
+  INTERNAL_ERROR            = 0x0001,
+  SERVER_BUSY               = 0x0002,
   FLOW_CONTROL_ERROR        = 0x0003,
   STREAM_ID_ERROR           = 0x0004,
   STREAM_STATE_ERROR        = 0x0005,
   FINAL_OFFSET_ERROR        = 0x0006,
   FRAME_ENCODING_ERROR      = 0x0007,
-  ERROR_TRANSPORT_PARAMETER = 0x0008,
-  ERROR_VERSION_NEGOTIATION = 0x0009,
+  TRANSPORT_PARAMETER_ERROR = 0x0008,
+  VERSION_NEGOTIATION_ERROR = 0x0009,
   PROTOCOL_VIOLATION        = 0x000A,
-  UNSOLICITED_PATH_RESPONSE = 0x000B,
   INVALID_MIGRATION         = 0x000C,
+  CRYPTO_ERROR_MASK         = 0x0100,
 };
 
 enum httpErrorType {
@@ -98,11 +102,29 @@ enum httpErrorType {
 
 enum keyPhase {
   keyPhaseUnknown,
-  keyPhaseUnprotected,
+  keyPhaseInitial,
   keyPhase0Rtt,
+  keyPhaseHandshake,
   keyPhase1Rtt
 };
 
+enum packetNumberSpace {
+  PN_SPACE_INITIAL,
+  PN_SPACE_HANDSHAKE,
+  PN_SPACE_01RTT,
+  kPacketNumberSpaceCount
+};
+
+/* Server can be in EARLY_DATA_NOT_NEGOTIATED and EARLY_DATA_ACCEPTED state:
+ *  - EARLY_DATA_NOT_NEGOTIATED - early-data are not negotiated or we still do not know.
+ *  - EARLY_DATA_ACCEPTED - early-data are accepted.
+ *  - EARLY_DATA_IGNORED - early-data are ignored.
+ * Client can be in all states:
+ *  - EARLY_DATA_NOT_NEGOTIATED - early-data are not negotiated.
+ *  - EARLY_DATA_SENT - early data are possible, but we still do not know if they are accepted.
+ *  - EARLY_DATA_IGNORED - early data are not accepted.
+ *  - EARLY_DATA_ACCEPTED - early data are accepted.
+ */
 enum earlyDataState {
   EARLY_DATA_NOT_NEGOTIATED,
   EARLY_DATA_SENT,
@@ -113,6 +135,7 @@ enum earlyDataState {
 class StreamPair;
 class StreamAck;
 class NSSHelper;
+class CryptoStream;
 class Sender;
 class StreamState;
 class ReliableData;
@@ -161,6 +184,7 @@ class MozQuic
   friend class StreamState;
   friend class ConnIDTimeout;
   friend class ShortHeaderData;
+  friend class CryptoStream;
 
 public:
   static const char *kAlpn;
@@ -181,7 +205,7 @@ public:
   void HandshakeTParamOutput(const unsigned char *, uint32_t amt);
   uint32_t HandshakeComplete(uint32_t errCode, struct mozquic_handshake_info *keyInfo);
 
-  CID HandshakeCID() const { return mHandshakeCID;}
+  CID InitialDestCIDForKeys() const { return mInitialDestCIDForKeys;}
   CID ServerCID() { return mIsClient ? mPeerCID : mLocalCID; }
   CID ClientCID() { return (!mIsClient) ? mPeerCID : mLocalCID; }
   
@@ -231,9 +255,17 @@ public:
   enum connectionState GetConnectionState() { return mConnectionState; }
   
   bool IsOpen() {
-    return (mConnectionState == CLIENT_STATE_0RTT || mConnectionState == CLIENT_STATE_1RTT ||
-            mConnectionState == CLIENT_STATE_CONNECTED || mConnectionState == SERVER_STATE_0RTT ||
-            mConnectionState == SERVER_STATE_1RTT || mConnectionState == SERVER_STATE_CONNECTED);
+    return (mConnectionState == CLIENT_STATE_INITIAL || mConnectionState == CLIENT_STATE_HANDSHAKE ||
+            mConnectionState == CLIENT_STATE_CONNECTED || mConnectionState == CLIENT_STATE_HAS_1RTT_KEYS ||
+            mConnectionState == SERVER_STATE_INITIAL || mConnectionState == SERVER_STATE_RETRY ||
+            mConnectionState == SERVER_STATE_HANDSHAKE || mConnectionState == SERVER_STATE_CONNECTED ||
+            mConnectionState == SERVER_STATE_HAS_1RTT_KEYS);
+  }
+
+  bool SendingEarlyData() {
+    return (mConnectionState == CLIENT_STATE_INITIAL || mConnectionState == CLIENT_STATE_HANDSHAKE ||
+            mConnectionState == CLIENT_STATE_HAS_1RTT_KEYS) &&
+            (mEarlyDataState == EARLY_DATA_SENT);
   }
 
   bool DecodedOK() { return mDecodedOK; }
@@ -251,42 +283,50 @@ public:
   bool     IsV6() { return mIPV6; }
   unsigned char Processed0RTT() { return !!mProcessed0RTT; }
 
+  uint32_t ClientConnected();
+
 private:
   void RaiseError(uint32_t err, const char *fmt, ...);
 
   static void EncodePN(uint32_t pn, uint8_t *framePtr, size_t &outPNLen);
     
   void AckScoreboard(uint64_t num, enum keyPhase kp);
-  int MaybeSendAck(bool delackOK = false);
+  uint32_t MaybeSendAck(bool delackOK = false);
 
   void Acknowledge(uint64_t packetNumber, keyPhase kp);
   uint32_t AckPiggyBack(unsigned char *pkt, uint64_t packetNumber, uint32_t avail, keyPhase kp,
                         bool bareAck, uint32_t &used);
   uint32_t Recv(unsigned char *, uint32_t len, uint32_t &outLen, const struct sockaddr *peer);
-  int ProcessServerCleartext(unsigned char *, uint32_t size, LongHeaderData &, bool &);
-  int ProcessClientInitial(unsigned char *, uint32_t size, const struct sockaddr *peer,
-                           LongHeaderData &, MozQuic **outSession, bool &);
-  int ProcessClientCleartext(unsigned char *pkt, uint32_t pktSize, LongHeaderData &, bool&);
-  uint32_t ProcessGeneralDecoded(const unsigned char *, uint32_t size, bool &, bool fromClearText);
-  uint32_t ProcessGeneral(const unsigned char *, uint32_t size, uint32_t headerSize, uint64_t packetNumber, bool &);
-  uint32_t Process0RTTProtectedPacket(const unsigned char *, uint32_t size, uint32_t headerSize, uint64_t packetNumber, bool &);
-  uint32_t BufferForLater(const unsigned char *pkt, uint32_t pktSize, uint32_t headerSize,
-                          uint64_t packetNumber);
+  uint32_t ProcessServerInitial(unsigned char *, uint32_t size, LongHeaderData &, bool &);
+  uint32_t ProcessServerHandshake(const unsigned char *, uint32_t size, LongHeaderData &, bool &);
+  uint32_t ProcessClientFirstInitial(unsigned char *, uint32_t size, const struct sockaddr *peer,
+                                     LongHeaderData &, MozQuic **outSession, bool &);
+  uint32_t ProcessClientInitial(unsigned char *, uint32_t size, LongHeaderData &header,
+                                bool &sendAck);
+  uint32_t ProcessClientHandshake(unsigned char *, uint32_t size, LongHeaderData &, bool&);
+  uint32_t ProcessGeneralDecoded(const unsigned char *, uint32_t size, bool &, keyPhase kp);
+  uint32_t ProcessGeneral(const unsigned char *, uint32_t size, uint32_t headerSize, uint64_t packetNumber,
+                          bool &);
+  uint32_t BufferForLaterProtected(const unsigned char *pkt, uint32_t pktSize, uint32_t headerSize,
+                                   uint64_t packetNumber);
   uint32_t ReleaseProtectedPackets();
-  bool IntegrityCheck(unsigned char *, uint32_t pktsize, uint32_t headersize, CID handhakeCID, uint64_t packetNumber,
-                      unsigned char *outbuf, uint32_t &outSize);
+  void BufferForLaterHandshake(const unsigned char *pkt, uint32_t pktSize);
+  uint32_t ReleaseHandshakePackets();
+  bool IntegrityCheckInitialPacket(unsigned char *, uint32_t pktsize, uint32_t headersize,
+                                   CID handhakeCID, uint64_t packetNumber,
+                                   unsigned char *outbuf, uint32_t &outSize);
   void ProcessAck(FrameHeaderData *ackMetaInfo, const unsigned char *framePtr,
-                  const unsigned char *endOfPacket, bool fromCleartext,
+                  const unsigned char *endOfPacket, keyPhase kp,
                   uint32_t &used);
 
   uint32_t HandlePathChallengeFrame(FrameHeaderData *meta);
-  uint32_t HandleAckFrame(FrameHeaderData *result, bool fromCleartext,
+  uint32_t HandleAckFrame(FrameHeaderData *result, keyPhase kp,
                           const unsigned char *pkt, const unsigned char *endpkt,
                           uint32_t &_ptr);
-  uint32_t HandleConnCloseFrame(FrameHeaderData *result, bool fromCleartext,
+  uint32_t HandleConnCloseFrame(FrameHeaderData *result, keyPhase kp,
                                 const unsigned char *pkt, const unsigned char *endpkt,
                                 uint32_t &_ptr);
-  uint32_t HandleApplicationCloseFrame(FrameHeaderData *result, bool fromCleartext,
+  uint32_t HandleApplicationCloseFrame(FrameHeaderData *result,
                                        const unsigned char *pkt, const unsigned char *endpkt,
                                        uint32_t &_ptr);
   
@@ -294,28 +334,28 @@ private:
   MozQuic *FindSession(const sockaddr *peer);
   MozQuic *FindSession(CID &cid);
   void RemoveSession(CID &cid);
-  uint32_t ClientConnected();
   uint32_t ServerConnected();
 
-  uint32_t Intake(bool *partialResult);
-  uint32_t FlushStream0(bool forceAck);
+  uint32_t Intake();
+  uint32_t FlushCrypto(bool forceAck);
 
-  int Client1RTT();
-  int ClientReadPostHandshakeTLSMessages();
-  int Server1RTT();
   int Bind(int portno);
   void AdjustBuffering();
   bool VersionOK(uint32_t proposed);
   uint32_t GenerateVersionNegotiation(LongHeaderData &clientHeader, const struct sockaddr *peer);
   uint32_t ProcessVersionNegotiation(unsigned char *pkt, uint32_t pktSize, LongHeaderData &header);
-  uint32_t ProcessServerStatelessRetry(unsigned char *pkt, uint32_t pktSize, LongHeaderData &header);
+  uint32_t ProcessServerStatelessRetry(LongHeaderData &header);
 
   MozQuic *Accept(const struct sockaddr *clientAddr,
-                  CID clientCID, CID handshakeCID, uint64_t aCIPacketNumber);
+                  CID clientCID, CID initialDestCIDForKeys, uint64_t aCIPacketNumber);
 
   void StartPMTUD1();
   void CompletePMTUD1();
   void AbortPMTUD1();
+
+  static packetNumberSpace KeyPhaseToPacketNumberSpace(keyPhase kp);
+
+  void EnsureSetupServerTransportExtension();
 
 public:
   static uint32_t EncodeVarint(uint64_t input, unsigned char *dest, uint32_t avail, uint32_t &used);
@@ -332,11 +372,17 @@ public:
   void EncryptPNInPlace(enum operationType mode, unsigned char *pn,
                         const unsigned char *cipherTextToSample, uint32_t cipherLen);
 
+  void NewEpoch(uint16_t epoch);
+  uint32_t RecordLayerData(uint16 epoch, const unsigned char *data, uint32_t len);
+  keyPhase CurrentKeyPhase();
+
 private:
   uint32_t CreateShortPacketHeader(unsigned char *pkt, uint32_t pktSize, uint32_t &used, unsigned char **pnPtrOut);
-  uint32_t Create0RTTLongPacketHeader(unsigned char *pkt, uint32_t pktSize, uint32_t &used,
-                                      unsigned char **payloadLenPtr,
-                                      unsigned char **pnPtr);
+
+  uint32_t CreateLongPacketHeader(LongHeaderType type, packetNumberSpace pnSpace,
+                                  unsigned char *pkt, uint32_t pktSize,
+                                  uint32_t &used, unsigned char **payloadLenPtr,
+                                  unsigned char **pnPtr, size_t &pnLen);
   uint32_t ProtectedTransmit(unsigned char *header, uint32_t headerLen, const unsigned char *pnPtr,
                              unsigned char *data, uint32_t dataLen, uint32_t dataAllocation,
                              bool addAcks, bool ackable, bool queueOnly = false,
@@ -349,12 +395,18 @@ private:
                                                CID &connID, unsigned char *out);
   uint32_t StatelessResetEnsureKey();
   void EnsureSetupClientTransportParameters();
+
+  void NewEpochClient(uint16_t epoch);
+  void NewEpochServer(uint16_t epoch);
+  bool FrameAllowed(keyPhase kp, FrameType ft);
+
   mozquic_socket_t mFD;
 
   bool mHandleIO;
   bool mIsClient;
   bool mIsChild;
-  bool mReceivedServerClearText;
+  bool mReceivedServerRetryPkt;
+  bool mReceivedServerInitialPkt;
   bool mSetupTransportExtension;
   bool mIgnorePKI;
   bool mTolerateBadALPN;
@@ -399,13 +451,14 @@ private:
 
   CID mLocalCID;
   CID mPeerCID;
-  CID mHandshakeCID;
+  CID mInitialDestCIDForKeys;
+  CID mRetryCID;
 
   uint16_t mMaxPacketConfig;
   uint16_t mMTU;
   uint16_t mDropRate;
-  uint64_t mNextTransmitPacketNumber;
-  uint64_t mNextRecvPacketNumber; // expected
+  uint64_t mNextTransmitPacketNumber[3];
+  uint64_t mNextRecvPacketNumber[3]; // expected
   uint64_t mClientInitialPacketNumber; // only set on child in server
 
   uint64_t mGenAckFor;
@@ -415,9 +468,9 @@ private:
   void *mClosure;
   int  (*mConnEventCB)(void *, uint32_t, void *);
 
-  std::unique_ptr<NSSHelper>   mNSSHelper;
-  std::unique_ptr<StreamState> mStreamState;
-  std::unique_ptr<Sender>      mSendState;
+  std::unique_ptr<NSSHelper>    mNSSHelper;
+  std::unique_ptr<StreamState>  mStreamState;
+  std::unique_ptr<Sender>       mSendState;
 
   // parent and children are only defined on the server
   MozQuic *mParent; // only in child
@@ -425,6 +478,7 @@ private:
   std::list<std::shared_ptr<MozQuic>> mChildren; // only in parent
 
   std::list<BufferedPacket> mBufferedProtectedPackets;
+  std::list<BufferedPacket> mBufferedHandshakePackets;
 
   // The beginning of a connection.
   uint64_t mTimestampConnBegin;
@@ -458,15 +512,20 @@ private:
 
   ConnIDTimeout mConnIDTimeout;
 
+  std::unique_ptr<unsigned char[]> mToken;
+  uint32_t mTokenLen;
+  CID mDestCIDBeforeRetry;
+  uint32_t SendRetry();
+  uint32_t VerifyToken(LongHeaderData &longHeader);
+
 public:
-  uint64_t HighestTransmittedAckable() { return mHighestTransmittedAckable; }
+  uint64_t HighestTransmittedAckable(packetNumberSpace pnSpace);
 private:
-  uint64_t mHighestTransmittedAckable;
+  uint64_t mHighestTransmittedAckable[3];
   
 public: // callbacks from nsshelper
-  int32_t NSSInput(void *buf, int32_t amount);
-  int32_t NSSOutput(const void *buf, int32_t amount);
-   
+  int32_t NSSOutput(const void *buf, int32_t amount, keyPhase kp);
+  void HandshakeCompleted();
 };
 
 } //namespace

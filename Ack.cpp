@@ -23,12 +23,14 @@ static const uint32_t kReorderingThreshold = 3;
 void
 MozQuic::AckScoreboard(uint64_t packetNumber, enum keyPhase kp)
 {
-  if (mStreamState->mAckList.empty()) {
-    mStreamState->mAckList.emplace_front(packetNumber, Timestamp(), kp);
+  packetNumberSpace pnSpace = MozQuic::KeyPhaseToPacketNumberSpace(kp);
+  if (mStreamState->mAckList[pnSpace].empty()) {
+    mStreamState->mAckList[pnSpace].emplace_front(packetNumber, Timestamp(), kp);
     return;
   }
-  auto iter = mStreamState->mAckList.begin();
-  for (; iter != mStreamState->mAckList.end(); ++iter) {
+
+  auto iter = mStreamState->mAckList[pnSpace].begin();
+  for (; iter != mStreamState->mAckList[pnSpace].end(); ++iter) {
     if ((iter->mPhase == kp) &&
         ((iter->mPacketNumber + 1) == packetNumber)) {
       // the common case is to just adjust this counter
@@ -50,13 +52,13 @@ MozQuic::AckScoreboard(uint64_t packetNumber, enum keyPhase kp)
       break;
     }
   }
-  mStreamState->mAckList.emplace(iter, packetNumber, Timestamp(), kp);
+  mStreamState->mAckList[pnSpace].emplace(iter, packetNumber, Timestamp(), kp);
 }
 
-int
+uint32_t
 MozQuic::MaybeSendAck(bool delAckOK)
 {
-  if (mStreamState->mAckList.empty()) {
+  if (mStreamState->mAckList[PN_SPACE_01RTT].empty()) {
     return MOZQUIC_OK;
   }
 
@@ -73,8 +75,8 @@ MozQuic::MaybeSendAck(bool delAckOK)
   }
 
   if (delAckOK && !mDelAckTimer->Armed()) {
-    uint64_t timerVal = mSendState->SmoothedRTT() >> 2;
-    // todo min and max filters
+    uint64_t timerVal = std::max(mSendState->SmoothedRTT() >> 2, kMaxAckDelayDefault);
+    // todo min filters
     // todo consider how 1/4 addition to measured rtt loop impacts srtt based things
     AckLog5("bare ack arm and delay delAckTimer %d\n", timerVal);
     mDelAckTimer->Arm(timerVal);
@@ -87,8 +89,8 @@ MozQuic::MaybeSendAck(bool delAckOK)
     mDelAckTimer->Cancel();
   }
   
-  for (auto iter = mStreamState->mAckList.begin();
-       iter != mStreamState->mAckList.end(); ++iter) {
+  for (auto iter = mStreamState->mAckList[PN_SPACE_01RTT].begin();
+       iter != mStreamState->mAckList[PN_SPACE_01RTT].end(); ++iter) {
     if (iter->Transmitted()) {
       continue;
     }
@@ -121,13 +123,10 @@ MozQuic::AckPiggyBack(unsigned char *pkt, uint64_t packetNumberOfAck, uint32_t a
   uint32_t offsetRollbackExtra = 0;
   uint32_t offsetCheckpoint = 0;
 
-  for (auto iter = mStreamState->mAckList.begin(); iter != mStreamState->mAckList.end(); iter++) {
+  packetNumberSpace pnSpace = MozQuic::KeyPhaseToPacketNumberSpace(kp);
+
+  for (auto iter = mStreamState->mAckList[pnSpace].begin(); iter != mStreamState->mAckList[pnSpace].end(); iter++) {
     // list ordered as 7/2, 2/1.. (ack 7,6,5.. 2,1 but not 4,3 or 0) i.e. highest num first
-    if ((kp <= keyPhaseUnprotected) && (iter->mPhase >= keyPhase0Rtt)) {
-      AckLog7("skip ack generation of %lX wrong kp need %d the phase is %d\n",
-              iter->mPacketNumber, iter->mPhase, kp);
-      break;
-    }
 
     if (newFrame) {
       newFrame = false;
@@ -153,7 +152,7 @@ MozQuic::AckPiggyBack(unsigned char *pkt, uint64_t packetNumberOfAck, uint32_t a
       if (!bareAck) {
         delay64 = Timestamp() - *(iter->mReceiveTime.begin());
         delay64 *= 1000; // wire encoding is microseconds
-        if (kp != keyPhaseUnprotected) {
+        if (kp != keyPhaseInitial) {
           delay64 /= (1ULL << mLocalAckDelayExponent);
         } else {
           delay64 /= (1ULL << kDefaultAckDelayExponent);
@@ -243,8 +242,10 @@ MozQuic::AckPiggyBack(unsigned char *pkt, uint64_t packetNumberOfAck, uint32_t a
       }
     }
 
-    AckLog6("created ack of %lX (%d extra) into pn=%lX @ block %d [%d prev transmits]\n",
-            iter->mPacketNumber, iter->mExtra, packetNumberOfAck, ackBlockCounter, iter->mTransmits.size());
+    AckLog6("created ack of %lX pnSpace=%d (%d extra) into pn=%lX @ block %d [%d prev transmits]\n",
+            iter->mPacketNumber, pnSpace, iter->mExtra, packetNumberOfAck, ackBlockCounter,
+            iter->mTransmits.size());
+
     iter->mTransmits.push_back(std::pair<uint64_t, uint64_t>(packetNumberOfAck, Timestamp()));
   }
   
@@ -253,6 +254,7 @@ MozQuic::AckPiggyBack(unsigned char *pkt, uint64_t packetNumberOfAck, uint32_t a
     // has already been accounted for
     EncodeVarintAs2(ackBlockCounter, ackBlockLocation);
   }
+
   return MOZQUIC_OK;
 }
 
@@ -261,8 +263,8 @@ MozQuic::Acknowledge(uint64_t packetNumber, keyPhase kp)
 {
   assert(mIsChild || mIsClient);
 
-  if (packetNumber >= mNextRecvPacketNumber) {
-    mNextRecvPacketNumber = packetNumber + 1;
+  if (packetNumber >= mNextRecvPacketNumber[KeyPhaseToPacketNumberSpace(kp)]) {
+    mNextRecvPacketNumber[KeyPhaseToPacketNumberSpace(kp)] = packetNumber + 1;
   }
 
   AckLog6("%p REQUEST TO GEN ACK FOR %lX kp=%d\n", this, packetNumber, kp);
@@ -272,7 +274,7 @@ MozQuic::Acknowledge(uint64_t packetNumber, keyPhase kp)
 
 void
 MozQuic::ProcessAck(FrameHeaderData *ackMetaInfo, const unsigned char *framePtr,
-                    const unsigned char *endOfPacket, bool fromCleartext,
+                    const unsigned char *endOfPacket, keyPhase kp,
                     uint32_t &outUsedByAckFrame)
 {
   // frameptr points to the beginning of the ackblock section
@@ -314,9 +316,8 @@ MozQuic::ProcessAck(FrameHeaderData *ackMetaInfo, const unsigned char *framePtr,
     }
     framePtr += amtParsed;
 
-    AckLog5("ACK RECVD (%s) FOR %lX -> %lX\n",
-            fromCleartext ? "cleartext" : "protected",
-            largestAcked - extra, largestAcked);
+    AckLog5("ACK RECVD (keyPhase=%d) FOR %lX -> %lX\n",
+            kp, largestAcked - extra, largestAcked);
 
     // form a stack here so we can process them starting at the
     // lowest packet number, which is how mStreamState->mUnAckedPackets is ordered and
@@ -339,12 +340,14 @@ MozQuic::ProcessAck(FrameHeaderData *ackMetaInfo, const unsigned char *framePtr,
   bool maybeDoEarlyRetransmit = false;
   uint64_t reportLossLessThan = 0;
 
-  auto dataIter = mStreamState->mUnAckedPackets.cbegin();
+  packetNumberSpace pnSpace = MozQuic::KeyPhaseToPacketNumberSpace(kp);
+  auto dataIter = mStreamState->mUnAckedPackets[pnSpace].cbegin();
   for (auto iters = numRanges; iters > 0; --iters) {
     uint64_t haveAckFor = ackStack[iters - 1].first;
     uint64_t haveAckForEnd = haveAckFor + ackStack[iters - 1].second;
 
-    if (mPMTUD1PacketNumber &&
+    if ((pnSpace == PN_SPACE_01RTT) &&
+        mPMTUD1PacketNumber &&
         (mPMTUD1PacketNumber >= haveAckFor) &&
         (mPMTUD1PacketNumber < haveAckForEnd)) {
       CompletePMTUD1();
@@ -353,14 +356,14 @@ MozQuic::ProcessAck(FrameHeaderData *ackMetaInfo, const unsigned char *framePtr,
     for (; haveAckFor < haveAckForEnd; haveAckFor++) {
 
       // skip over stuff that is too low
-      for (; (dataIter != mStreamState->mUnAckedPackets.cend()) && ((*dataIter)->mPacketNumber < haveAckFor); dataIter++);
+      for (; (dataIter != mStreamState->mUnAckedPackets[pnSpace].cend()) && ((*dataIter)->mPacketNumber < haveAckFor); dataIter++);
 
-      if ((dataIter == mStreamState->mUnAckedPackets.cend()) || ((*dataIter)->mPacketNumber > haveAckFor)) {
+      if ((dataIter == mStreamState->mUnAckedPackets[pnSpace].cend()) || ((*dataIter)->mPacketNumber > haveAckFor)) {
         AckLog9("haveAckFor %lX did not find matching unacked data\n", haveAckFor)
       } else {
         assert ((*dataIter)->mPacketNumber == haveAckFor);
 
-        if ((haveAckFor == mHighestTransmittedAckable) && haveAckFor) {
+        if ((haveAckFor == mHighestTransmittedAckable[pnSpace]) && haveAckFor) {
           maybeDoEarlyRetransmit = true;
         }
         AckLog5("haveAckFor %lX found unacked data. packet size %d fromrto=%d\n", haveAckFor,
@@ -373,11 +376,11 @@ MozQuic::ProcessAck(FrameHeaderData *ackMetaInfo, const unsigned char *framePtr,
           uint64_t xmit = (*dataIter)->mTransmitTime;
           mSendState->RTTSample(xmit,
                                 ackMetaInfo->u.mAck.mAckDelay *
-                                (1ULL << (fromCleartext ? kDefaultAckDelayExponent : mPeerAckDelayExponent)) /
+                                (1ULL << ((pnSpace != PN_SPACE_01RTT) ? kDefaultAckDelayExponent : mPeerAckDelayExponent)) /
                                 1000ULL);
         }
-        mSendState->Ack((*dataIter)->mPacketNumber, (*dataIter)->mPacketLen);
-        dataIter = mStreamState->mUnAckedPackets.erase(dataIter);
+        mSendState->Ack((*dataIter)->mPacketNumber, (*dataIter)->mPacketLen, pnSpace);
+        dataIter = mStreamState->mUnAckedPackets[pnSpace].erase(dataIter);
       }
     }
     // fast retransmit.. may be a nop
@@ -386,14 +389,14 @@ MozQuic::ProcessAck(FrameHeaderData *ackMetaInfo, const unsigned char *framePtr,
     }
   }
 
-  if (maybeDoEarlyRetransmit && !mStreamState->mUnAckedPackets.empty()) {
+  if (maybeDoEarlyRetransmit && !mStreamState->mUnAckedPackets[pnSpace].empty()) {
     // this means we processed an ack for the highest unacked packet
     // but some things still are not acked. That means early retransmit.
     // todo this should really have a delay
-    reportLossLessThan = std::max(reportLossLessThan, mHighestTransmittedAckable);
+    reportLossLessThan = std::max(reportLossLessThan, mHighestTransmittedAckable[pnSpace]);
   }
   if (reportLossLessThan) {
-    mStreamState->ReportLossLessThan(reportLossLessThan);
+    mStreamState->ReportLossLessThan(reportLossLessThan, pnSpace);
   }
 
   // obv unacked lists should be combined (data, other frames, acks)
@@ -402,7 +405,7 @@ MozQuic::ProcessAck(FrameHeaderData *ackMetaInfo, const unsigned char *framePtr,
     uint64_t haveAckForEnd = haveAckFor + ackStack[iters - 1].second;
     for (; haveAckFor < haveAckForEnd; haveAckFor++) {
       bool foundHaveAckFor = false;
-      for (auto acklistIter = mStreamState->mAckList.cbegin(); acklistIter != mStreamState->mAckList.cend(); ) {
+      for (auto acklistIter = mStreamState->mAckList[pnSpace].cbegin(); acklistIter != mStreamState->mAckList[pnSpace].cend(); ) {
         bool foundAckFor = false;
         for (auto vectorIter = acklistIter->mTransmits.cbegin();
              vectorIter != acklistIter->mTransmits.cend(); vectorIter++ ) {
@@ -418,7 +421,7 @@ MozQuic::ProcessAck(FrameHeaderData *ackMetaInfo, const unsigned char *framePtr,
         if (!foundAckFor) {
           acklistIter++;
         } else {
-          acklistIter = mStreamState->mAckList.erase(acklistIter);
+          acklistIter = mStreamState->mAckList[pnSpace].erase(acklistIter);
           foundHaveAckFor = true;
         }
       } // macklist iteration
@@ -433,19 +436,13 @@ MozQuic::ProcessAck(FrameHeaderData *ackMetaInfo, const unsigned char *framePtr,
 }
 
 uint32_t
-MozQuic::HandleAckFrame(FrameHeaderData *result, bool fromCleartext,
+MozQuic::HandleAckFrame(FrameHeaderData *result, keyPhase kp,
                         const unsigned char *pkt, const unsigned char *endpkt,
                         uint32_t &_ptr)
 {
-  if (fromCleartext && (mConnectionState == SERVER_STATE_LISTEN)) {
-    // acks are not allowed processing client_initial
-    RaiseError(MOZQUIC_ERR_GENERAL, (char *) "acks are not allowed in client initial\n");
-    return MOZQUIC_ERR_GENERAL;
-  }
-
   // pkt + _ptr now points at ack blocks
   uint32_t used;
-  ProcessAck(result, pkt + _ptr, endpkt, fromCleartext, used);
+  ProcessAck(result, pkt + _ptr, endpkt, kp, used);
   _ptr += used;
   return MOZQUIC_OK;
 }

@@ -12,10 +12,15 @@ namespace mozquic  {
 enum  {
   kMaxStreamIDServerDefaultBidi   = 1024 + 1,
   kMaxStreamIDServerDefaultUni    = 1024 + 3,
-  kMaxStreamIDClientDefaultBidi   = 1024 + 4,
+  kMaxStreamIDClientDefaultBidi   = 1024 + 0,
   kMaxStreamIDClientDefaultUni    = 1024 + 2,
   kMaxStreamDataDefault           = 10 * 1024 * 1024,
-  kMaxDataDefault                 = 50 * 1024 * 1024,
+  kMaxDataDefault                 = 0,
+};
+
+// Thisis set as initial parameters by our implementation.
+enum {
+  kMaxDataInitial = 50 * 1024 * 1024,
 };
 
 enum StreamType{
@@ -60,7 +65,7 @@ public:
   virtual uint32_t ConnectionWrite(std::unique_ptr<ReliableData> &p) = 0;
   virtual uint32_t ScrubUnWritten(uint32_t id) = 0;
   virtual void Reset0RTTData() = 0;
-  virtual uint32_t GetIncrement() = 0;
+  virtual uint32_t GetIncrement(uint32_t streamID) = 0;
   virtual uint32_t IssueStreamCredit(uint32_t streamID, uint64_t newMax) = 0;
   virtual uint32_t ConnectionReadBytes(uint64_t amt) = 0;
   virtual void     SignalReadyToWrite(StreamOut *streamOut) = 0;
@@ -101,9 +106,12 @@ private:
   bool mBlocked; // blocked on stream based flow control
 };
 
+class CryptoStream;
+
 class StreamState : public FlowController
 {
   friend class MozQuic;
+  friend class CryptoStream;
 public:
   StreamState(MozQuic *, uint64_t initialStreamWindow,
                          uint64_t initialConnectionWindow);
@@ -111,10 +119,10 @@ public:
 
   // FlowController Methods
   uint32_t ConnectionWrite(std::unique_ptr<ReliableData> &p) override;
-  uint32_t ConnectionWriteNow(std::unique_ptr<ReliableData> &p);
+  uint32_t ConnectionWriteNow(std::unique_ptr<ReliableData> &p, packetNumberSpace pnSpace);
   uint32_t ScrubUnWritten(uint32_t id) override;
   void Reset0RTTData() override;
-  uint32_t GetIncrement() override;
+  uint32_t GetIncrement(uint32_t streamID) override;
   uint32_t IssueStreamCredit(uint32_t streamID, uint64_t newMax) override;
   uint32_t ConnectionReadBytes(uint64_t amt) override;
   void     SignalReadyToWrite(StreamOut *out) override;
@@ -123,7 +131,7 @@ public:
   uint32_t MakeSureStreamCreated(uint32_t streamID);
   uint32_t FindStream(uint32_t streamID, std::unique_ptr<ReliableData> &d);
   uint32_t RetransmitOldestUnackedData(bool fromRTO);
-  uint32_t ReportLossLessThan(uint64_t packetNumber);
+  uint32_t ReportLossLessThan(uint64_t packetNumber, packetNumberSpace pnSpace);
   bool     AnyUnackedPackets();
   void     DeleteDoneStreams();
   bool     MaybeDeleteStream(uint32_t streamID);
@@ -133,35 +141,35 @@ public:
   uint32_t Flush(bool forceAck);
   void     TrackPacket(uint64_t packetNumber, uint32_t packetSize);
   uint32_t GeneratePathResponse(uint64_t data);
-  uint32_t HandleStreamFrame(FrameHeaderData *result, bool fromCleartext,
+  uint32_t HandleStreamFrame(FrameHeaderData *result,
                              const unsigned char *pkt, const unsigned char *endpkt,
                              uint32_t &_ptr);
-  uint32_t HandleResetStreamFrame(FrameHeaderData *result, bool fromCleartext,
+  uint32_t HandleResetStreamFrame(FrameHeaderData *result,
                                   const unsigned char *pkt, const unsigned char *endpkt,
                                   uint32_t &_ptr);
-  uint32_t HandleMaxStreamDataFrame(FrameHeaderData *result, bool fromCleartext,
+  uint32_t HandleMaxStreamDataFrame(FrameHeaderData *result,
                                     const unsigned char *pkt, const unsigned char *endpkt,
                                     uint32_t &_ptr);
-  uint32_t HandleMaxDataFrame(FrameHeaderData *result, bool fromCleartext,
+  uint32_t HandleMaxDataFrame(FrameHeaderData *result,
                               const unsigned char *pkt, const unsigned char *endpkt,
                               uint32_t &_ptr);
-  uint32_t HandleMaxStreamIDFrame(FrameHeaderData *result, bool fromCleartext,
+  uint32_t HandleMaxStreamIDFrame(FrameHeaderData *result,
                               const unsigned char *pkt, const unsigned char *endpkt,
                               uint32_t &_ptr);
-  uint32_t HandleStreamBlockedFrame(FrameHeaderData *result, bool fromCleartext,
+  uint32_t HandleStreamBlockedFrame(FrameHeaderData *result,
                                     const unsigned char *pkt, const unsigned char *endpkt,
                                     uint32_t &_ptr);
-  uint32_t HandleBlockedFrame(FrameHeaderData *result, bool fromCleartext,
+  uint32_t HandleBlockedFrame(FrameHeaderData *result,
                               const unsigned char *pkt, const unsigned char *endpkt,
                               uint32_t &_ptr);
-  uint32_t HandleStreamIDBlockedFrame(FrameHeaderData *result, bool fromCleartext,
+  uint32_t HandleStreamIDBlockedFrame(FrameHeaderData *result,
                                       const unsigned char *pkt, const unsigned char *endpkt,
                                       uint32_t &_ptr);
-  uint32_t HandleStopSendingFrame(FrameHeaderData *result, bool fromCleartext,
+  uint32_t HandleStopSendingFrame(FrameHeaderData *result,
                                   const unsigned char *pkt, const unsigned char *endpkt,
                                   uint32_t &_ptr);
   uint32_t CreateFrames(unsigned char *&framePtr, const unsigned char *endpkt,
-                        bool justZero, TransmittedPacket *);
+                        keyPhase kp, TransmittedPacket *);
   uint32_t CreateRstStreamFrame(unsigned char *&framePtr, const unsigned char *endpkt,
                                 ReliableData *chunk);
   uint32_t CreateStopSendingFrame(unsigned char *&framePtr, const unsigned char *endpkt,
@@ -180,6 +188,10 @@ public:
                                    ReliableData *chunk);
   uint32_t CreateStreamIDBlockedFrame(unsigned char *&framePtr, const unsigned char *endpkt,
                                       ReliableData *chunk, bool &toRemove);
+
+  uint32_t CreateCryptoFrame(packetNumberSpace pnSpace,
+                             unsigned char *&aFramePtr, const unsigned char *endpkt,
+                             std::list<std::unique_ptr<ReliableData>>::iterator &chunkIter);
 
   void InitIDs(uint32_t nextBidi, uint32_t nextUni, uint32_t nextRBidi, uint32_t nextRUni,
                uint32_t maxStreamIDBidi, uint32_t maxStreamIDUni) {
@@ -201,10 +213,10 @@ private:
   StreamType GetStreamType(uint32_t streamID) { return (streamID & 0x2) ? UNI_STREAM : BIDI_STREAM; }
   bool IsBidiStream(uint32_t streamID) { return (streamID & 0x2) ? false : true; }
   bool IsUniStream(uint32_t streamID) { return (streamID & 0x2) ? true : false; }
-  bool IsLocalStream(uint32_t streamID) { return (!(streamID & 1) && mMozQuic->mIsClient) || // even and you're the client
-                                         ((streamID & 1) && !mMozQuic->mIsClient); } // odd and you're the server
-  bool IsPeerStream(uint32_t streamID) {return (!(streamID & 1) && !mMozQuic->mIsClient) ||  // even and you're the server
-                                        ((streamID & 1) && mMozQuic->mIsClient); }    // odd and you're the client
+  bool IsLocalStream(uint32_t streamID) { return (!(streamID & 0x1) && mMozQuic->mIsClient) || // even and you're the client
+                                         ((streamID & 0x1) && !mMozQuic->mIsClient); } // odd and you're the server
+  bool IsPeerStream(uint32_t streamID) {return (!(streamID & 0x1) && !mMozQuic->mIsClient) ||  // even and you're the server
+                                        ((streamID & 0x1) && mMozQuic->mIsClient); }    // odd and you're the client
   bool IsSendOnlyStream(uint32_t streamID) { return IsUniStream(streamID) && IsLocalStream(streamID); }
   bool IsRecvOnlyStream(uint32_t streamID) { return IsUniStream(streamID) && IsPeerStream(streamID); }
 
@@ -212,8 +224,14 @@ private:
   uint32_t mNextStreamID[2]; // [0]->bidirectional [1]->unidirectional
 
 private: // these still need friend mozquic
-  uint32_t mPeerMaxStreamData;  // max offset we can send from transport params on new stream
-  uint32_t mLocalMaxStreamData; // max offset peer can send on new stream
+  // max offset we can send from transport params on new stream. 3 values:
+  uint32_t mPeerMaxStreamDataBidiLocal; // for a local bidi stream.
+  uint32_t mPeerMaxStreamDataBidiRemote; // for a remote bidi stream.
+  uint32_t mPeerMaxStreamDataUni; // for the local uni stream.
+  // max offset peer can send on new stream. 3 values
+  uint32_t mLocalMaxStreamDataBidiLocal; // for a local bidi stream.
+  uint32_t mLocalMaxStreamDataBidiRemote; // for a remote bidi stream.
+  uint32_t mLocalMaxStreamDataUni; // for the local uni stream.
 
   uint64_t mPeerMaxData; // conn limit set by other
   uint64_t mMaxDataSent; // sending bytes charged againts mPeerMaxData
@@ -227,8 +245,6 @@ private: // these still need friend mozquic
   bool     mMaxStreamIDBlocked[2]; // blocked from creating by streamID limits [0]->bidirectional [1]->unidirectional
   uint32_t mNextRecvStreamIDUsed[2]; //  id consumed by peer [0]->bidirectional [1]->unidirectional
 
-  std::unique_ptr<StreamPair> mStream0;
-
   // when issue #48 is resolved, this can become an unordered map
   std::map<uint32_t, std::shared_ptr<StreamPair>> mStreams;
 
@@ -239,8 +255,9 @@ private: // these still need friend mozquic
   // retransmit happens off of the FrameList in mUnAckedPackets
   // duplicating it and placing it in mConnUnWritten.
   // mUnackedPackets is sorted by the packet number it was sent in.
-  std::list<std::unique_ptr<ReliableData>> mConnUnWritten;
-  std::list<std::unique_ptr<TransmittedPacket>> mUnAckedPackets;
+  // Packets are sent and received in 3 different encription levels: initial, handshake and 0/1rtt.
+  std::list<std::unique_ptr<ReliableData>> mConnUnWritten[3];
+  std::list<std::unique_ptr<TransmittedPacket>> mUnAckedPackets[3];
 
   // macklist is the current state of all unacked acks - maybe written out,
   // maybe not. ordered with the highest packet ack'd at front. Each time
@@ -251,7 +268,9 @@ private: // these still need friend mozquic
   // now iterate from rear (oldest data being acknowledged).
   //
   // acks ordered {1,2,5,6,7} as 7/2, 2/1 (biggest at head)
-  std::list<StreamAck>                    mAckList;
+  std::list<StreamAck>                    mAckList[3];
+
+  std::unique_ptr<CryptoStream> mCryptoStream;
 };
 
 class ReliableData
@@ -274,11 +293,12 @@ public:
   void MakeBlocked(uint64_t offset) { mType = kBlocked; mOffset = offset;}
   void MakeStreamIDBlocked(uint32_t maxID) { mType = kStreamIDBlocked; mMaxStreamID = maxID; }
   void MakePathResponse(uint64_t data) { mType = kPathResponse; mPathData = data; }
+  void MakeCrypto() { mType = kCrypto; }
 
   enum 
   {
     kStream, kRstStream, kMaxStreamData, kStreamBlocked, kMaxData, kBlocked,
-    kStreamIDBlocked, kMaxStreamID, kStopSending, kPathResponse
+    kStreamIDBlocked, kMaxStreamID, kStopSending, kPathResponse, kCrypto
   } mType;
   
   std::unique_ptr<const unsigned char []>mData;
@@ -408,6 +428,37 @@ public:
   std::unique_ptr<StreamOut> mOut;
   std::unique_ptr<StreamIn>  mIn;
   MozQuic *mMozQuic;
+};
+
+class CryptoStream
+{
+public:
+  explicit CryptoStream(StreamState *aStreamState);
+  ~CryptoStream() {};
+
+  // todo it would be nice to have a zero copy interface
+  uint32_t Read(packetNumberSpace pnSpace,
+                unsigned char *buffer, uint32_t avail, uint32_t &amt);
+
+  bool Empty(packetNumberSpace pnSpace);
+
+  void Reset();
+
+  uint32_t Write(const unsigned char *data, uint32_t len, keyPhase kp);
+
+  uint32_t HandleCryptoFrame(FrameHeaderData *result,
+                             const unsigned char *pkt, const unsigned char *endpkt,
+                             uint32_t &_ptr, keyPhase kp);
+private:
+  StreamState *mStreamState;
+
+  // Supply places data on the input (i.e. read()) queue
+  uint32_t Supply(std::unique_ptr<ReliableData> &p, packetNumberSpace pnSpace);
+
+  // Crypto can send and receive packets in 3 different encription levels: initial, handshake and 0/1rtt.
+  uint64_t mOutputOffset[3]; // for data send to the peer.
+  uint64_t mInputOffset[3]; // for data received from the peer.
+  std::list<std::unique_ptr<ReliableData>> mAvailable[3];
 };
 
 }

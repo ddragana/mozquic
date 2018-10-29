@@ -12,7 +12,7 @@
 static struct closure
 {
   int test_state;
-  int32_t test16_stream[2][3];
+  mozquic_stream_t *test16_stream[2][3];
   int shouldRead[2][3];
   mozquic_connection_t *child[2];
   int connection;
@@ -43,12 +43,11 @@ void testConfig16(struct mozquic_config_t *_c)
 
 int  findStreamIndex(mozquic_stream_t *stream)
 {
-  int32_t streamID = mozquic_get_streamid(stream);
   for (int i = 0; i < 3; i++) {
     if (!testState.test16_stream[testState.connection - 1][i]) {
-      testState.test16_stream[testState.connection - 1][i] = streamID;
+      testState.test16_stream[testState.connection - 1][i] = stream;
       return i;
-    } else if (testState.test16_stream[testState.connection - 1][i] == streamID) {
+    } else if (testState.test16_stream[testState.connection - 1][i] == stream) {
       return i;
     }
   }
@@ -95,15 +94,15 @@ int testEvent16(void *closure, uint32_t event, void *param)
       test_assert((testState.test_state >= 1) &&
                   (testState.test_state <= 3));
       test_assert((streamIndex >= 0) && (streamIndex <= 2));
-      test_assert((mozquic_get_streamid(stream) == 4) ||
-                  (mozquic_get_streamid(stream) == 8) ||
-                  (mozquic_get_streamid(stream) == 12));
+      test_assert((mozquic_get_streamid(stream) == 0) ||
+                  (mozquic_get_streamid(stream) == 4) ||
+                  (mozquic_get_streamid(stream) == 8));
     } else {
       test_assert((testState.test_state == 6) ||
                   (testState.test_state == 7));
       test_assert((streamIndex == 0) || (streamIndex == 1));
-      test_assert((mozquic_get_streamid(stream) == 4) ||
-                  (mozquic_get_streamid(stream) == 8));
+      test_assert((mozquic_get_streamid(stream) == 0) ||
+                  (mozquic_get_streamid(stream) == 4));
     }
 
     do {

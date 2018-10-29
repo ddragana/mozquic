@@ -35,7 +35,7 @@ public:
   {
   }
 
-  std::unique_ptr<const unsigned char []>mData;
+  std::unique_ptr<unsigned char []>mData;
   uint32_t mLen;
   uint32_t mHeaderSize;
   uint32_t mPacketNumber;
@@ -58,8 +58,8 @@ public:
   uint32_t Transmit(uint64_t packetNumber, bool bareAck, bool zeroRTT, bool queueOnly,
                     const unsigned char *, uint32_t len, const struct sockaddr *peer);
   void RTTSample(uint64_t xmit, uint64_t delay);
-  void Ack(uint64_t packetNumber, uint32_t packetLength);
-  void ReportLoss(uint64_t packetNumber, uint32_t packetLength);
+  void Ack(uint64_t packetNumber, uint32_t packetLength, packetNumberSpace);
+  void ReportLoss(uint64_t packetNumber, uint32_t packetLength, packetNumberSpace pnSpace);
   void Dismissed0RTTPackets(uint32_t bytes);
   void Flush();
   void Connected();
@@ -108,6 +108,7 @@ private:
   uint64_t mLastSend;
   uint64_t mSSThresh;
   uint64_t mEndOfRecovery; // packet #
+  packetNumberSpace mEndOfRecoveryPktNumberSpace; // the packet number space of mEndOfRecovery.
 };
 
 } //namespace

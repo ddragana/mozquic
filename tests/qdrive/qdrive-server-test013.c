@@ -84,8 +84,8 @@ int testEvent13(void *closure, uint32_t event, void *param)
                 state.state == 6 ||
                 state.state == 7);
     mozquic_stream_t *stream = param;
-    test_assert(mozquic_get_streamid(stream) == 4 ||
-                mozquic_get_streamid(stream) == 8 ||
+    test_assert(mozquic_get_streamid(stream) == 0 ||
+                mozquic_get_streamid(stream) == 4 ||
                 mozquic_get_streamid(stream) == 2 ||
                 mozquic_get_streamid(stream) == 6 ||
                 mozquic_get_streamid(stream) == 1 ||
@@ -99,14 +99,14 @@ int testEvent13(void *closure, uint32_t event, void *param)
     test_assert(code == MOZQUIC_OK);
     int *finptr;
 
-    if(mozquic_get_streamid(stream) == 4) {
+    if(mozquic_get_streamid(stream) == 0) {
       state.readBidi1 += amt;
       finptr = &state.finBidi1;
       if (fin) {
         test_assert(mozquic_send(stream, gbuf, sizeof(gbuf), 0) == MOZQUIC_OK);
         test_assert(mozquic_send(stream, gbuf, mozquic_get_streamid(stream), 1) == MOZQUIC_OK);
       }
-    } else if(mozquic_get_streamid(stream) == 8) {
+    } else if(mozquic_get_streamid(stream) == 4) {
       state.readBidi2 += amt;
       finptr = &state.finBidi2;
       if (fin) {

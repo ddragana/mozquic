@@ -37,12 +37,14 @@ enum operationType {
   kDecryptHandshake,
   kEncrypt0RTT,
   kDecrypt0RTT,
+  kEncryptInitial,
+  kDecryptInitial,
 };
 
 class CID
 {
 public:
-CID() : mNull(true) { mText[0] = '-'; mText[1] = 0;}
+CID() : mLen(0), mNull(true) { mText[0] = '-'; mText[1] = 0;}
   void Parse(uint8_t cil, const unsigned char *cidptr);
   void Randomize();
   char *Text();
@@ -89,25 +91,28 @@ class MozQuic;
 class LongHeaderData
 {
 public:
-  LongHeaderData(MozQuic *, unsigned char *, uint32_t, uint64_t next);
+  LongHeaderData(unsigned char *, uint32_t);
+  uint32_t DecodeVersionSpecificHeaderFields(unsigned char *pkt, uint32_t pktSize);
+  uint32_t DecodePacketNumber(unsigned char *pkt, uint32_t pktSize, MozQuic *mozQuic, uint64_t next);
   enum LongHeaderType mType;
   CID mDestCID;
   CID mSourceCID;
-  uint32_t mPayloadLen;
+  CID mOrigDestCID;
+  uint32_t mLen; // Total length of the packet (header + payload)
+  uint32_t mInvariantSize; // size of the invariant part.
+  uint32_t mPayloadLen; // payload size.
   uint64_t mPacketNumber;
   uint32_t mVersion;
-  uint32_t mHeaderSize;
-
-private:
-  uint64_t DecodePacketNumber(unsigned char *pkt, uint64_t next, uint32_t pktSize,
-                              size_t &outPNSize);
+  uint32_t mHeaderSize; // header size, including length, packet number and, for INITIAL packet, also token field.
+  uint32_t mTokenLen;
+  std::unique_ptr<unsigned char[]> mToken;
 };
 
 class ShortHeaderData
 {
 public:
   ShortHeaderData(MozQuic *logging, unsigned char *, uint32_t, uint64_t, bool,
-                  CID &defaultCID);
+                  CID &defaultCID, bool decodePN);
 
   static uint64_t DecodePacketNumber(MozQuic *, enum operationType mode,
                                      unsigned char *pkt, uint64_t next, uint32_t pktSize,
@@ -133,7 +138,7 @@ enum FrameType {
   FRAME_TYPE_PING              = 0x07,
   FRAME_TYPE_BLOCKED           = 0x08,
   FRAME_TYPE_STREAM_BLOCKED    = 0x09,
-  FRAME_TYPE_STREAM_ID_BLOCKED  = 0x0A,
+  FRAME_TYPE_STREAM_ID_BLOCKED = 0x0A,
   FRAME_TYPE_NEW_CONNECTION_ID = 0x0B,
   FRAME_TYPE_STOP_SENDING      = 0x0C,
   FRAME_TYPE_ACK               = 0x0D,
@@ -143,6 +148,10 @@ enum FrameType {
   // STREAM                    = 0x10 to 0x17
   FRAME_MASK_STREAM            = 0xf8,
   FRAME_TYPE_STREAM            = 0x10, // 0001 0...
+
+  FRAME_TYPE_CRYPTO            = 0x18,
+  FRAME_TYPE_NEW_TOKEN         = 0x19,
+  FRAME_TYPE_ACK_ECN           = 0x1A,
 };
 
 #define VARIABLE_INTEGER_ENCODING_BITS 0xC0
@@ -150,12 +159,16 @@ enum FrameType {
 class FrameHeaderData
 {
 public:
-  FrameHeaderData(const unsigned char *, uint32_t, MozQuic *, bool);
+  FrameHeaderData(const unsigned char *, uint32_t, MozQuic *);
 
   FrameType mType;
   uint32_t  mValid;
   uint32_t  mFrameLen;
   union {
+    struct {
+      uint32_t mDataLen;
+      uint64_t mOffset;
+    } mCrypto;
     struct {
       bool mFinBit;
       uint32_t mDataLen;

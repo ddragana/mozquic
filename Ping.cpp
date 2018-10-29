@@ -47,7 +47,7 @@ MozQuic::CheckPeer(uint32_t deadline)
 void
 MozQuic::StartPMTUD1()
 {
-  if (mPMTUD1PacketNumber) {
+  if (mPMTUD1Deadline->Armed()) {
     return;
   }
   if ((mConnectionState != CLIENT_STATE_CONNECTED) &&
@@ -72,7 +72,7 @@ MozQuic::StartPMTUD1()
   plainPkt[headerLen] = FRAME_TYPE_PING; // make the first frame a ping frame
 
   ConnectionLog5("pmtud1: %d MTU test started\n", mPMTUDTarget);
-  mPMTUD1PacketNumber = mNextTransmitPacketNumber;
+  mPMTUD1PacketNumber = mNextTransmitPacketNumber[PN_SPACE_01RTT];
   mPMTUD1Deadline->Arm(3000); // 3 seconds to ack the ping
 
   uint32_t bytesOut = 0;
@@ -80,7 +80,7 @@ MozQuic::StartPMTUD1()
                         plainPkt + headerLen, padAmt, kMaxMTU,
                         false, true, false,
                         mPMTUDTarget, &bytesOut) != MOZQUIC_OK) {
-    mPMTUD1PacketNumber = 0;
+    mPMTUD1Deadline->Cancel();
   } else {
     mStreamState->TrackPacket(mPMTUD1PacketNumber, bytesOut);
   }
@@ -89,7 +89,6 @@ MozQuic::StartPMTUD1()
 void
 MozQuic::CompletePMTUD1()
 {
-  assert (mPMTUD1PacketNumber);
   ConnectionLog5("pmtud1: %d MTU CONFIRMED.\n", mPMTUDTarget);
   mPMTUD1Deadline->Cancel();
   mMTU = mPMTUDTarget;
@@ -98,7 +97,6 @@ MozQuic::CompletePMTUD1()
 void
 MozQuic::AbortPMTUD1()
 {
-  assert (mPMTUD1PacketNumber);
   ConnectionLog1("pmtud1: %d MTU CHECK Failed.\n", mPMTUDTarget);
   mPMTUD1PacketNumber = 0;
   mPMTUD1Deadline->Cancel();

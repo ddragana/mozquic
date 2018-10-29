@@ -16,7 +16,7 @@
 namespace mozquic  {
 
 const char *Log::mCategoryName[] = {
-  "ack", "stream", "connection", "tls", "handshake", "sender",
+  "ack", "stream", "connection", "tls", "handshake", "sender", "crypto",
   ""
 };
 

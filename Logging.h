@@ -27,7 +27,7 @@ public:
   static void sParseSubscriptions(char *envStr);
   enum 
   {
-    ACK, STREAM, CONNECTION, TLS, HANDSHAKE, SENDER,
+    ACK, STREAM, CONNECTION, TLS, HANDSHAKE, SENDER, CRYPTO,
     kCategoryCount
   };
 
