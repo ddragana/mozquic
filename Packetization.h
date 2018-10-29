@@ -128,30 +128,31 @@ public:
 };
 
 enum FrameType {
-  FRAME_TYPE_PADDING           = 0x00,
-  FRAME_TYPE_RST_STREAM        = 0x01,
-  FRAME_TYPE_CONN_CLOSE        = 0x02,
-  FRAME_TYPE_APPLICATION_CLOSE = 0x03,
-  FRAME_TYPE_MAX_DATA          = 0x04,
-  FRAME_TYPE_MAX_STREAM_DATA   = 0x05,
-  FRAME_TYPE_MAX_STREAM_ID     = 0x06,
-  FRAME_TYPE_PING              = 0x07,
-  FRAME_TYPE_BLOCKED           = 0x08,
-  FRAME_TYPE_STREAM_BLOCKED    = 0x09,
-  FRAME_TYPE_STREAM_ID_BLOCKED = 0x0A,
-  FRAME_TYPE_NEW_CONNECTION_ID = 0x0B,
-  FRAME_TYPE_STOP_SENDING      = 0x0C,
-  FRAME_TYPE_ACK               = 0x0D,
-  FRAME_TYPE_PATH_CHALLENGE    = 0x0E,
-  FRAME_TYPE_PATH_RESPONSE     = 0x0F,
+  FRAME_TYPE_PADDING              = 0x00,
+  FRAME_TYPE_RST_STREAM           = 0x01,
+  FRAME_TYPE_CONN_CLOSE           = 0x02,
+  FRAME_TYPE_APPLICATION_CLOSE    = 0x03,
+  FRAME_TYPE_MAX_DATA             = 0x04,
+  FRAME_TYPE_MAX_STREAM_DATA      = 0x05,
+  FRAME_TYPE_MAX_STREAM_ID        = 0x06,
+  FRAME_TYPE_PING                 = 0x07,
+  FRAME_TYPE_BLOCKED              = 0x08,
+  FRAME_TYPE_STREAM_BLOCKED       = 0x09,
+  FRAME_TYPE_STREAM_ID_BLOCKED    = 0x0A,
+  FRAME_TYPE_NEW_CONNECTION_ID    = 0x0B,
+  FRAME_TYPE_STOP_SENDING         = 0x0C,
+  FRAME_TYPE_RETIRE_CONNECTION_ID = 0x0D,
+  FRAME_TYPE_PATH_CHALLENGE       = 0x0E,
+  FRAME_TYPE_PATH_RESPONSE        = 0x0F,
 
-  // STREAM                    = 0x10 to 0x17
-  FRAME_MASK_STREAM            = 0xf8,
-  FRAME_TYPE_STREAM            = 0x10, // 0001 0...
+  // STREAM                       = 0x10 to 0x17
+  FRAME_MASK_STREAM               = 0xf8,
+  FRAME_TYPE_STREAM               = 0x10, // 0001 0...
 
-  FRAME_TYPE_CRYPTO            = 0x18,
-  FRAME_TYPE_NEW_TOKEN         = 0x19,
-  FRAME_TYPE_ACK_ECN           = 0x1A,
+  FRAME_TYPE_CRYPTO               = 0x18,
+  FRAME_TYPE_NEW_TOKEN            = 0x19,
+  FRAME_TYPE_ACK                  = 0x1A,
+  FRAME_TYPE_ACK_ECN              = 0x1B,
 };
 
 #define VARIABLE_INTEGER_ENCODING_BITS 0xC0
